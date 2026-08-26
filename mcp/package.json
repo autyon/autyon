@@ -1,0 +1,17 @@
+{
+  "name": "autyon-mcp",
+  "version": "0.5.2",
+  "description": "Autyon AgentChain MCP server \u2014 identity, permission, reputation, wallet, payment, settlement for any MCP agent.",
+  "type": "module",
+  "bin": {
+    "autyon-mcp": "./index.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "ethers": "^6.13.4",
+    "zod": "^3.23.8"
+  }
+}

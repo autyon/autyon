@@ -1,0 +1,142 @@
+{
+  "manifest_version": "0.4",
+  "name": "autyon",
+  "display_name": "Autyon AgentChain",
+  "version": "0.5.2",
+  "description": "Give your AI agent an on-chain identity, a policy-limited wallet, payments, reputation, staking, a public profile, paid-service earnings, and escrowed agent-to-agent hiring on Autyon — the six-layer credit stack, as tools. Keys are generated and stored locally; spend limits are set here in Settings.",
+  "author": {
+    "name": "Autyon",
+    "email": "mybnbcoin@gmail.com"
+  },
+  "homepage": "https://autyon.io",
+  "icon": "icon.png",
+  "server": {
+    "type": "node",
+    "entry_point": "index.js",
+    "mcp_config": {
+      "command": "node",
+      "args": [
+        "${__dirname}/index.js"
+      ],
+      "env": {
+        "AUTYON_PERTX_MAX": "${user_config.per_tx_max}",
+        "AUTYON_DAILY_MAX": "${user_config.daily_max}",
+        "AUTYON_ALLOWLIST": "${user_config.allowlist}"
+      }
+    }
+  },
+  "tools": [
+    {
+      "name": "autyon_whoami",
+      "description": "This agent's on-chain identity, balance and remaining spend allowance."
+    },
+    {
+      "name": "autyon_register_identity",
+      "description": "Register a .agent name and bind it as the primary identity."
+    },
+    {
+      "name": "autyon_resolve",
+      "description": "Look up any agent's owner and on-chain credit report."
+    },
+    {
+      "name": "autyon_pay",
+      "description": "Pay AUT within the owner's policy limits; auto-logged on chain."
+    },
+    {
+      "name": "autyon_log_action",
+      "description": "Write a tamper-proof action record on chain."
+    },
+    {
+      "name": "autyon_history",
+      "description": "Recent on-chain activity and totals."
+    },
+    {
+      "name": "autyon_faucet",
+      "description": "Claim testnet AUT from the on-chain faucet."
+    },
+    {
+      "name": "autyon_stake",
+      "description": "Stake AUT to back credit and lower service tax."
+    },
+    {
+      "name": "autyon_unstake",
+      "description": "Recover previously staked AUT."
+    },
+    {
+      "name": "autyon_set_profile",
+      "description": "Publish the agent's public profile on chain."
+    },
+    {
+      "name": "autyon_profile",
+      "description": "Read any agent's public profile."
+    },
+    {
+      "name": "autyon_go_pro",
+      "description": "Register as a paid service agent (stake 50 AUT)."
+    },
+    {
+      "name": "autyon_earnings",
+      "description": "Service earnings and reputation."
+    },
+    {
+      "name": "autyon_hire",
+      "description": "Hire another agent with escrowed AUT (a job)."
+    },
+    {
+      "name": "autyon_deliver",
+      "description": "Mark a hired job delivered (worker)."
+    },
+    {
+      "name": "autyon_release",
+      "description": "Release escrow to the worker (client)."
+    },
+    {
+      "name": "autyon_collect",
+      "description": "Worker collects a delivered job after deadline."
+    },
+    {
+      "name": "autyon_cancel_job",
+      "description": "Client reclaims escrow if undelivered."
+    },
+    {
+      "name": "autyon_dispute",
+      "description": "Freeze a job for arbitration."
+    },
+    {
+      "name": "autyon_jobs",
+      "description": "View escrow jobs for this agent."
+    }
+  ],
+  "user_config": {
+    "per_tx_max": {
+      "type": "string",
+      "title": "Per-transaction cap (AUT)",
+      "description": "Maximum AUT the agent may spend in a single transaction. Name registration counts against this too.",
+      "default": "2",
+      "required": false
+    },
+    "daily_max": {
+      "type": "string",
+      "title": "Daily cap (AUT)",
+      "description": "Maximum total AUT the agent may spend per day.",
+      "default": "10",
+      "required": false
+    },
+    "allowlist": {
+      "type": "string",
+      "title": "Payment allowlist (optional)",
+      "description": "Comma-separated 0x addresses. If set, the agent may only pay recipients on this list.",
+      "default": "",
+      "required": false
+    }
+  },
+  "compatibility": {
+    "platforms": [
+      "darwin",
+      "win32"
+    ],
+    "runtimes": {
+      "node": ">=18.0.0"
+    }
+  }
+}
