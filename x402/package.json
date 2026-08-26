@@ -1,0 +1,17 @@
+{
+  "name": "@autyon/x402",
+  "version": "0.1.0",
+  "description": "x402 pay-to-call gateway for Autyon service agents — charge AUT per API call, verified on-chain.",
+  "type": "module",
+  "main": "./paywall.js",
+  "exports": { ".": "./paywall.js" },
+  "files": ["paywall.js", "README.md"],
+  "engines": { "node": ">=18" },
+  "keywords": ["autyon", "x402", "agent", "payments", "api", "monetization"],
+  "homepage": "https://autyon.io",
+  "repository": { "type": "git", "url": "https://github.com/autyon/autyon.git", "directory": "x402" },
+  "license": "MIT",
+  "author": "Autyon",
+  "dependencies": { "ethers": "^6.13.4" },
+  "peerDependencies": { "express": "^4 || ^5" }
+}
