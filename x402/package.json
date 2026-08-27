@@ -12,6 +12,7 @@
   "repository": { "type": "git", "url": "https://github.com/autyon/autyon.git", "directory": "x402" },
   "license": "MIT",
   "author": "Autyon",
+  "publishConfig": { "access": "public" },
   "dependencies": { "ethers": "^6.13.4" },
   "peerDependencies": { "express": "^4 || ^5" }
 }
