@@ -20,6 +20,7 @@
   "repository": { "type": "git", "url": "https://github.com/autyon/autyon.git", "directory": "sdk" },
   "license": "MIT",
   "author": "Autyon",
+  "publishConfig": { "access": "public" },
   "dependencies": {
     "ethers": "^6.13.4"
   }
