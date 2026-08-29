@@ -10,10 +10,12 @@
 // block-explorer URL.
 
 import {
-  JsonRpcProvider, Wallet, Contract, parseEther, formatEther, isAddress, ZeroAddress, id,
+  JsonRpcProvider, Wallet, Contract, parseEther, formatEther, parseUnits, formatUnits,
+  isAddress, ZeroAddress, id, MaxUint256,
 } from "ethers";
 import {
   CHAIN_ID, DEFAULT_RPC, DEFAULT_API, SCAN, ADDR, ABI, JOB_STATUS, PROFILE_KEYS,
+  DEX, DEX_TOKENS, DEX_DIRECT_PAIRS, DEX_ROUTER_ABI, DEX_ERC20_ABI,
 } from "./contracts.js";
 
 const GAS = { gasPrice: 1_000_000_000n }; // flat 1 gwei, zeroBaseFee chain
@@ -231,7 +233,9 @@ export class AutyonClient {
     const wei = parseEther(String(amount));
     if (wei <= 0n) throw new Error("amount must be greater than zero.");
     const dest = await this._resolveTo(to);
-    const tx = await this.signer.sendTransaction({ to: dest.address, value: wei, ...GAS, gasLimit: 21000n });
+    // No fixed gasLimit: a .agent name can resolve to a contract wallet, whose
+    // receive()/fallback costs more than 21000 — let the node estimate.
+    const tx = await this.signer.sendTransaction({ to: dest.address, value: wei, ...GAS });
     await this._wait(tx);
     let logTx = null;
     try { const t = await this._c("actionLog", true).logAction(0, this.address, "payment", dest.address, wei, String(memo).slice(0, 500), GAS); await this._wait(t); logTx = t.hash; } catch {}
@@ -311,7 +315,14 @@ export class AutyonClient {
    * @param {Array<string|number>} [opts.allowAgentIds]  only pay these agent ids.
    */
   async x402Fetch(url, init = {}, opts = {}) {
-    let res = await fetch(url, init);
+    const ms = opts.timeoutMs ?? 30_000;
+    const timed = (u, i = {}) => {
+      if (i.signal) return fetch(u, i);                 // caller controls its own signal
+      const ac = new AbortController();
+      const t = setTimeout(() => ac.abort(), ms);
+      return fetch(u, { ...i, signal: ac.signal }).finally(() => clearTimeout(t));
+    };
+    let res = await timed(url, init);
     if (res.status !== 402) return res;
     const ch = await res.json().catch(() => ({}));
     const { agentId, priceWei, requestId } = ch;
@@ -324,7 +335,104 @@ export class AutyonClient {
     const paid = await this.payForCall(agentId, formatEther(BigInt(priceWei)), requestId);
     const sig = await this.signer.signMessage(requestId); // proves the payer redeems (not a front-runner)
     const headers = { ...(init.headers || {}), "X-Autyon-RequestId": requestId, "X-Autyon-Tx": paid.tx, "X-Autyon-Sig": sig };
-    return fetch(url, { ...init, headers });
+    return timed(url, { ...init, headers });
+  }
+
+  // ---------- AutyonSwap (DeFi sandbox) ----------
+
+  _dexToken(sym) {
+    const t = DEX_TOKENS[String(sym).toUpperCase()];
+    if (!t) throw new Error(`unknown token "${sym}" — one of: ${Object.keys(DEX_TOKENS).join(", ")}`);
+    return { symbol: String(sym).toUpperCase(), ...t };
+  }
+
+  _dexPath(fromSym, toSym) {
+    const F = this._dexToken(fromSym), T = this._dexToken(toSym);
+    if (F.symbol === T.symbol) throw new Error("cannot swap a token for itself.");
+    const direct = DEX_DIRECT_PAIRS.some(([a, b]) =>
+      (a === F.symbol && b === T.symbol) || (a === T.symbol && b === F.symbol));
+    return direct ? [F.address, T.address] : [F.address, DEX_TOKENS.USDT.address, T.address];
+  }
+
+  /** Quote a swap: how much `to` you get for `amount` of `from`. */
+  async quoteSwap(from, to, amount) {
+    const F = this._dexToken(from), T = this._dexToken(to);
+    const path = this._dexPath(from, to);
+    const router = new Contract(DEX.router, DEX_ROUTER_ABI, this.provider);
+    const amounts = await router.getAmountsOut(parseUnits(String(amount), F.decimals), path);
+    const out = amounts[amounts.length - 1];
+    return {
+      from: F.symbol, to: T.symbol, amountIn: String(amount),
+      amountOut: formatUnits(out, T.decimals),
+      route: path.length === 3 ? `${F.symbol} -> USDT -> ${T.symbol}` : `${F.symbol} -> ${T.symbol}`,
+    };
+  }
+
+  /**
+   * Swap on AutyonSwap. Native AUT is handled automatically on either side.
+   * @param {string} from   token symbol (AUT, USDT, USDC, ETH, BTC)
+   * @param {string} to     token symbol
+   * @param {string|number} amount  human units of `from`
+   * @param {object} [opts] { slippagePct = 1 }
+   */
+  async swap(from, to, amount, opts = {}) {
+    const F = this._dexToken(from), T = this._dexToken(to);
+    const path = this._dexPath(from, to);
+    const slippage = Number(opts.slippagePct ?? 1);
+    const amountIn = parseUnits(String(amount), F.decimals);
+    const router = new Contract(DEX.router, DEX_ROUTER_ABI, this.signer);
+    const amounts = await router.getAmountsOut(amountIn, path);
+    const expected = amounts[amounts.length - 1];
+    const minOut = expected * BigInt(Math.floor((100 - slippage) * 100)) / 10000n;
+    const deadline = Math.floor(Date.now() / 1000) + 900;
+
+    let approveTx = null;
+    if (!F.native) {
+      const erc = new Contract(F.address, DEX_ERC20_ABI, this.signer);
+      const allowance = await erc.allowance(this.address, DEX.router);
+      if (allowance < amountIn) {
+        const txA = await erc.approve(DEX.router, MaxUint256, GAS);
+        await this._wait(txA);
+        approveTx = txA.hash;
+      }
+    }
+
+    let tx;
+    if (F.native) {
+      tx = await router.swapExactAUTForTokens(minOut, path, this.address, deadline, { value: amountIn, ...GAS });
+    } else if (T.native) {
+      tx = await router.swapExactTokensForAUT(amountIn, minOut, path, this.address, deadline, GAS);
+    } else {
+      tx = await router.swapExactTokensForTokens(amountIn, minOut, path, this.address, deadline, GAS);
+    }
+    await this._wait(tx);
+    return {
+      swapped: `${amount} ${F.symbol}`, for: `~${formatUnits(expected, T.decimals)} ${T.symbol}`,
+      route: path.length === 3 ? `${F.symbol} -> USDT -> ${T.symbol}` : `${F.symbol} -> ${T.symbol}`,
+      tx: tx.hash, approveTx,
+    };
+  }
+
+  /** Balances of every sandbox token (plus native AUT). */
+  async tokenBalances(address = this.address) {
+    const out = { AUT: formatEther(await this.provider.getBalance(address)) };
+    for (const [sym, t] of Object.entries(DEX_TOKENS)) {
+      if (t.native) continue;
+      try {
+        const bal = await new Contract(t.address, DEX_ERC20_ABI, this.provider).balanceOf(address);
+        out[sym] = formatUnits(bal, t.decimals);
+      } catch { out[sym] = null; }
+    }
+    return out;
+  }
+
+  /** Mint test tokens from a token's public faucet() (testnet only). */
+  async tokenFaucet(sym) {
+    const t = this._dexToken(sym);
+    if (t.native) throw new Error("AUT comes from faucet.autyon.io, not a token faucet.");
+    const tx = await new Contract(t.address, DEX_ERC20_ABI, this.signer).faucet(GAS);
+    await this._wait(tx);
+    return { minted: t.symbol, tx: tx.hash };
   }
 
   // ---------- hiring / escrow ----------

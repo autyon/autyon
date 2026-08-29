@@ -64,6 +64,11 @@ const HELP = `autyon — Autyon AgentChain CLI
   autyon faucet                       claim testnet AUT
   autyon log <type> <detail>          write an on-chain action record
 
+  autyon swap <from> <to> <amount>    trade on AutyonSwap (AUT USDT USDC ETH BTC)
+  autyon quote <from> <to> <amount>   price a swap without trading
+  autyon balances                     all sandbox token balances
+  autyon token-faucet <symbol>        mint test USDT/USDC/ETH/BTC
+
 Flags: --key=0x…  --rpc=…   Env: AUTYON_KEY`;
 
 async function main() {
@@ -104,6 +109,10 @@ async function main() {
     case "jobs":      return out(await autyon.jobs(pos[0]));
     case "faucet":    return out(await autyon.faucet());
     case "log":       return out(await autyon.logAction(pos[0], pos.slice(1).join(" ")));
+    case "swap":      return out(await autyon.swap(pos[0], pos[1], pos[2], { slippagePct: flags.slippage ? Number(flags.slippage) : 1 }));
+    case "quote":     return out(await autyon.quoteSwap(pos[0], pos[1], pos[2]));
+    case "balances":  return out(await autyon.tokenBalances());
+    case "token-faucet": return out(await autyon.tokenFaucet(pos[0]));
     default:
       console.error(`Unknown command: ${cmd}\n`); console.log(HELP); process.exit(1);
   }
