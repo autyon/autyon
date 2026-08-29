@@ -70,9 +70,9 @@ export function autyonPaywall(opts = {}) {
   const iface = new Interface(SERVICE_ABI);
   const store = opts.store || memoryStore();
 
-  function challenge(req, res) {
+  async function challenge(req, res) {
     const requestId = hexlify(randomBytes(32));
-    store.put(requestId, { resource: req.path, priceWei: priceWei.toString(), status: "pending", exp: Date.now() + ttlMs });
+    await store.put(requestId, { resource: req.path, priceWei: priceWei.toString(), status: "pending", exp: Date.now() + ttlMs });
     res.status(402).json({
       x402Version: 1,
       error: "payment required",
@@ -92,13 +92,13 @@ export function autyonPaywall(opts = {}) {
       const requestId = req.header("X-Autyon-RequestId");
       const txHash = req.header("X-Autyon-Tx");
       const sig = req.header("X-Autyon-Sig");
-      if (!requestId || !txHash) return challenge(req, res);
+      if (!requestId || !txHash) return await challenge(req, res);
       if (!/^0x[0-9a-fA-F]{64}$/.test(requestId)) return res.status(400).json({ error: "bad requestId" });
       if (!/^0x[0-9a-fA-F]{64}$/.test(txHash)) return res.status(400).json({ error: "bad tx hash" });
       if (!sig) return res.status(400).json({ error: "missing X-Autyon-Sig (sign the requestId with the paying key)" });
 
       const rec = await store.get(requestId);
-      if (!rec || rec.exp < Date.now()) return challenge(req, res);          // unknown/expired -> new challenge
+      if (!rec || rec.exp < Date.now()) return await challenge(req, res);          // unknown/expired -> new challenge
       if (rec.status === "consumed") return res.status(402).json({ error: "payment already used" });
       if (rec.resource !== req.path) return res.status(403).json({ error: "payment is for a different resource" });
 

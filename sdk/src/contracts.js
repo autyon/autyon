@@ -76,3 +76,39 @@ export const ABI = {
 
 export const JOB_STATUS = ["none", "funded", "delivered", "released", "refunded", "disputed", "resolved"];
 export const PROFILE_KEYS = ["description", "avatar", "url", "endpoint", "skills"];
+
+// ---- AutyonSwap (DeFi sandbox) ----
+
+export const DEX = {
+  factory: "0x7979F01209f359eCc6EF8Eb017C3907Fd596b6aD",
+  router: "0x472f81E0b15d1D4a994A607C30857e8b6666137c", // AutyonSwapRouterV2
+  waut: "0x2395B0E0875FefFa196346164dBb4E7eb6960Ff1",
+};
+
+/** Tradable tokens. AUT is the native coin; the router wraps it transparently. */
+export const DEX_TOKENS = {
+  AUT: { address: DEX.waut, decimals: 18, native: true },
+  USDT: { address: "0xa4Bf9DC9a5409ee16c31eC98eFc65E8ED7A09e47", decimals: 6 },
+  USDC: { address: "0x1D33d3b23e8b9624210C4c2D3b88b0777dc8DdC7", decimals: 6 },
+  ETH: { address: "0x485C335231a39AC04b3fC4F4BE56F2a05B955d7B", decimals: 18 },
+  BTC: { address: "0xA61F9371a9076232E3b117b3eaF68d28aB1Beb84", decimals: 8 },
+};
+
+/** Direct pools; anything else routes through USDT. */
+export const DEX_DIRECT_PAIRS = [["ETH", "USDT"], ["BTC", "USDT"], ["USDC", "USDT"], ["AUT", "USDT"]];
+
+export const DEX_ROUTER_ABI = [
+  "function getAmountsOut(uint256 amountIn, address[] path) view returns (uint256[])",
+  "function swapExactTokensForTokens(uint256 amountIn, uint256 amountOutMin, address[] path, address to, uint256 deadline) returns (uint256)",
+  "function swapExactAUTForTokens(uint256 amountOutMin, address[] path, address to, uint256 deadline) payable returns (uint256)",
+  "function swapExactTokensForAUT(uint256 amountIn, uint256 amountOutMin, address[] path, address to, uint256 deadline) returns (uint256)",
+  "error Expired()", "error InsufficientAmount()", "error InsufficientLiquidity()",
+  "error InsufficientOutputAmount()", "error InvalidPath()", "error PairMissing()",
+];
+
+export const DEX_ERC20_ABI = [
+  "function balanceOf(address) view returns (uint256)",
+  "function allowance(address,address) view returns (uint256)",
+  "function approve(address,uint256) returns (bool)",
+  "function faucet()",
+];

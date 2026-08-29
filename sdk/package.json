@@ -1,6 +1,6 @@
 {
   "name": "@autyon/sdk",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "TypeScript/JavaScript SDK and CLI for Autyon AgentChain — on-chain identity, wallet, payments, reputation, staking, profiles, and escrowed agent-to-agent hiring.",
   "type": "module",
   "main": "./src/index.js",
