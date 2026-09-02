@@ -373,7 +373,7 @@ function scoreBand(s) {
 }
 
 /* ---------------- server + tools ---------------- */
-const server = new McpServer({ name: "autyon", version: "0.6.0" });
+const server = new McpServer({ name: "autyon", version: "0.7.0" });
 
 server.tool(
   "autyon_whoami",
