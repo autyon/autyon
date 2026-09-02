@@ -26,7 +26,8 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import {
-  JsonRpcProvider, Wallet, Contract, parseEther, formatEther, isAddress, ZeroAddress, id,
+  JsonRpcProvider, Wallet, Contract, parseEther, formatEther, parseUnits, formatUnits,
+  isAddress, ZeroAddress, id,
 } from "ethers";
 import fs from "node:fs";
 import path from "node:path";
@@ -45,6 +46,8 @@ const FAUCET = "0x8Eb08E93f61f8f835c1cf4C94fD74c14EF06C72B";
 const REGISTRY = "0x0ed6dafe3de759a46e7b6f1d7290f491dfae820a"; // AgentRegistry (service agents)
 const SERVICE  = "0x3218003233f418bb83829c9627494b49ef0edf96"; // ServicePayment
 const ESCROW   = "0x1DB932d3Af53F42b806Bb984180DBE5Bf6682811"; // TaskEscrow (hire jobs)
+const BOARD    = "0xf3718296d3fF376C6426514C3b72923607A4D269"; // OpenJobBoard (public task market)
+const STAKING  = "0x5700633eAc00C429B8bf1893a87d913Dbb202945"; // AutyonStakingNative (credit-score stake)
 
 const REGISTRAR_ABI = [
   "function register(string label, address agentWallet) payable returns (bytes32)",
@@ -107,6 +110,30 @@ const ESCROW_ABI = [
   "event JobCreated(uint256 indexed jobId, address indexed client, address indexed worker, uint256 amount, uint64 deadline)",
 ];
 const JOB_STATUS = ["none", "funded", "delivered", "released", "refunded", "disputed", "resolved"];
+const BOARD_ABI = [
+  "function postJob(string brief, uint64 duration, uint64 claimWindow, uint256 minStake) payable returns (uint256)",
+  "function claim(uint256 postId) payable returns (uint256)",
+  "function release(uint256 postId)",
+  "function settle(uint256 postId)",
+  "function cancelPost(uint256 postId)",
+  "function bondFor(uint256 postId) view returns (uint256)",
+  "function effectiveStake(address) view returns (uint256)",
+  "function nextPostId() view returns (uint256)",
+  "function getPost(uint256) view returns (tuple(address poster, uint256 budget, uint256 minStake, uint64 duration, uint64 claimBy, bytes32 briefHash, uint8 status, address worker, uint256 jobId, uint256 bond))",
+  "event PostCreated(uint256 indexed postId, address indexed poster, uint256 budget, uint256 minStake, uint64 duration, uint64 claimBy, string brief)",
+  "event PostClaimed(uint256 indexed postId, uint256 indexed jobId, address indexed worker, uint256 bond)",
+];
+const POST_STATUS = ["none", "open", "claimed", "cancelled", "expired", "settled"];
+const STAKING_ABI = [
+  "function stake() payable",
+  "function requestUnstake(uint256 amount)",
+  "function withdraw()",
+  "function claim()",
+  "function earned(address) view returns (uint256)",
+  "function staked(address) view returns (uint256)",
+  "function pendingUnstake(address) view returns (uint256 amount, uint64 unlockAt)",
+  "function MIN_STAKE() view returns (uint256)",
+];
 
 /* ---------------- key + policy (owner-controlled files) ---------------- */
 const DIR = path.join(os.homedir(), ".autyon");
@@ -301,10 +328,14 @@ async function creditReport(address) {
     const p = await reg.primaryName(address);
     if (p) out.primary_name = `${clean(p)}.agent`;
   } catch {}
-  // AUT staked for tax tier / credit backing (ServicePayment.lockStake)
+  // AUT staked for credit backing (AutyonStakingNative — what the credit score reads)
   try {
-    const svc = new Contract(SERVICE, SERVICE_ABI, provider);
-    out.staked_aut = formatEther(await svc.payerLockedStake(address));
+    const stk = new Contract(STAKING, STAKING_ABI, provider);
+    out.staked_aut = formatEther(await stk.staked(address));
+    const pend = await stk.pendingUnstake(address);
+    if (pend.amount > 0n) out.unstaking_aut = formatEther(pend.amount);
+    const rew = await stk.earned(address);
+    if (rew > 0n) out.staking_rewards_aut = formatEther(rew);
   } catch {}
   // If this address owns a registered service agent, pull its on-chain stats.
   try {
@@ -342,7 +373,7 @@ function scoreBand(s) {
 }
 
 /* ---------------- server + tools ---------------- */
-const server = new McpServer({ name: "autyon", version: "0.5.2" });
+const server = new McpServer({ name: "autyon", version: "0.6.0" });
 
 server.tool(
   "autyon_whoami",
@@ -576,7 +607,7 @@ server.tool(
 
 server.tool(
   "autyon_stake",
-  "Stake AUT to back this agent's credit (skin in the game) and earn a lower service tax tier. Staked funds are locked for a short period, then recoverable with autyon_unstake. Counts against the owner's spend caps.",
+  "Stake AUT into AutyonStakingNative to back this agent's credit score (skin in the game) and earn staking rewards. Minimum stake 1 AUT. Unstaking has a cooldown (autyon_unstake). Counts against the owner's spend caps.",
   { amount: z.string().describe("amount of AUT to stake, e.g. \"5\"") },
   async ({ amount }) => withLock(async () => {
     let wei;
@@ -590,39 +621,49 @@ server.tool(
       throw new Error(`POLICY: staking ${amount} AUT would exceed today's daily cap of ${pol.dailyMaxAUT} AUT.`);
     const bal = await provider.getBalance(signer.address);
     if (bal < wei + parseEther("0.01")) throw new Error(`balance ${formatEther(bal)} AUT is too low to stake ${amount} AUT + gas.`);
+    const stkR = new Contract(STAKING, STAKING_ABI, provider);
+    const min = await stkR.MIN_STAKE();
+    const already = await stkR.staked(signer.address);
+    if (already + wei < min)
+      throw new Error(`minimum total stake is ${formatEther(min)} AUT (you have ${formatEther(already)} staked).`);
     recordSpend(wei);
     let tx;
     try {
-      const svc = new Contract(SERVICE, SERVICE_ABI, signer);
-      tx = await svc.lockStake({ value: wei, ...GAS });
+      const stk = new Contract(STAKING, STAKING_ABI, signer);
+      tx = await stk.stake({ value: wei, ...GAS });
       await waitTx(tx);
     } catch (e) { recordSpend(-wei); throw e; }
-    const svc = new Contract(SERVICE, SERVICE_ABI, provider);
-    const staked = formatEther(await svc.payerLockedStake(signer.address));
-    return { content: [{ type: "text", text: `Staked ${amount} AUT. Total staked: ${staked} AUT.\nTx: ${SCAN}/tx/${tx.hash}` }] };
+    const staked = formatEther(await stkR.staked(signer.address));
+    return { content: [{ type: "text", text: `Staked ${amount} AUT. Total staked: ${staked} AUT — this backs your credit score and accrues rewards (autyon_claim_rewards).\nTx: ${SCAN}/tx/${tx.hash}` }] };
   })
 );
 
 server.tool(
   "autyon_unstake",
-  "Recover previously staked AUT (after the lock period). Returns funds to this agent's balance.",
-  { amount: z.string().describe("amount of AUT to unstake") },
+  "Unstake AUT from AutyonStakingNative. Two phases: call with an amount to START the cooldown; call with no amount once the cooldown has elapsed to WITHDRAW the pending stake. During cooldown the amount counts at half weight for the credit score.",
+  { amount: z.string().optional().describe("AUT to move into cooldown; omit to withdraw an elapsed cooldown") },
   async ({ amount }) => withLock(async () => {
+    const stkR = new Contract(STAKING, STAKING_ABI, provider);
+    const stk = new Contract(STAKING, STAKING_ABI, signer);
+    const pend = await stkR.pendingUnstake(signer.address);
+    const now = Math.floor(Date.now() / 1000);
+    if (!amount) {
+      if (pend.amount === 0n) throw new Error(`nothing is cooling down. Call with an amount first to start the cooldown.`);
+      if (Number(pend.unlockAt) > now)
+        return { content: [{ type: "text", text: `${formatEther(pend.amount)} AUT is still cooling down — withdrawable in ${humanDuration(Number(pend.unlockAt) - now)}.` }] };
+      const tx = await stk.withdraw(GAS);
+      await waitTx(tx);
+      return { content: [{ type: "text", text: `Withdrew ${formatEther(pend.amount)} AUT back to this agent's balance.\nTx: ${SCAN}/tx/${tx.hash}` }] };
+    }
     let wei;
     try { wei = parseEther(amount); } catch { throw new Error(`"${amount}" is not a valid AUT amount.`); }
     if (wei <= 0n) throw new Error(`amount must be greater than zero.`);
-    const svcR = new Contract(SERVICE, SERVICE_ABI, provider);
-    // Friendly lock-period check instead of a raw revert.
-    try {
-      const until = Number(await svcR.lockedUntil(signer.address));
-      const now = Math.floor(Date.now() / 1000);
-      if (until > now) return { content: [{ type: "text", text: `Staked AUT is locked for another ${humanDuration(until - now)} (tax-tier lock). Try again after it elapses.` }] };
-    } catch {}
-    const svc = new Contract(SERVICE, SERVICE_ABI, signer);
-    const tx = await svc.unlockStake(wei, GAS);
+    if (pend.amount > 0n && Number(pend.unlockAt) > now)
+      return { content: [{ type: "text", text: `A cooldown of ${formatEther(pend.amount)} AUT is already running (ready in ${humanDuration(Number(pend.unlockAt) - now)}). Re-requesting would restart the clock — wait and withdraw first.` }] };
+    const tx = await stk.requestUnstake(wei, GAS);
     await waitTx(tx);
-    const staked = formatEther(await new Contract(SERVICE, SERVICE_ABI, provider).payerLockedStake(signer.address));
-    return { content: [{ type: "text", text: `Unstaked ${amount} AUT. Remaining staked: ${staked} AUT.\nTx: ${SCAN}/tx/${tx.hash}` }] };
+    const p2 = await stkR.pendingUnstake(signer.address);
+    return { content: [{ type: "text", text: `Cooldown started for ${amount} AUT — withdrawable in ${humanDuration(Number(p2.unlockAt) - now)} (call autyon_unstake again with no amount).\nTx: ${SCAN}/tx/${tx.hash}` }] };
   })
 );
 
@@ -885,6 +926,322 @@ server.tool(
     }
     return { content: [{ type: "text", text: (mine.length ? mine.join("\n") : "(no jobs involving this agent yet)") + `\nUse autyon_jobs with a job_id for details.` }] };
   }
+);
+
+/* ---------------- AutyonSwap (DeFi sandbox) ---------------- */
+
+const DEX_ROUTER = "0x472f81E0b15d1D4a994A607C30857e8b6666137c"; // AutyonSwapRouterV2
+const DEX_WAUT = "0x2395B0E0875FefFa196346164dBb4E7eb6960Ff1";
+const DEX_TOKENS = {
+  AUT: { address: DEX_WAUT, decimals: 18, native: true },
+  USDT: { address: "0xa4Bf9DC9a5409ee16c31eC98eFc65E8ED7A09e47", decimals: 6 },
+  USDC: { address: "0x1D33d3b23e8b9624210C4c2D3b88b0777dc8DdC7", decimals: 6 },
+  ETH: { address: "0x485C335231a39AC04b3fC4F4BE56F2a05B955d7B", decimals: 18 },
+  BTC: { address: "0xA61F9371a9076232E3b117b3eaF68d28aB1Beb84", decimals: 8 },
+};
+const DEX_DIRECT = [["ETH", "USDT"], ["BTC", "USDT"], ["USDC", "USDT"], ["AUT", "USDT"]];
+const DEX_ROUTER_ABI = [
+  "function getAmountsOut(uint256 amountIn, address[] path) view returns (uint256[])",
+  "function swapExactTokensForTokens(uint256 amountIn, uint256 amountOutMin, address[] path, address to, uint256 deadline) returns (uint256)",
+  "function swapExactAUTForTokens(uint256 amountOutMin, address[] path, address to, uint256 deadline) payable returns (uint256)",
+  "function swapExactTokensForAUT(uint256 amountIn, uint256 amountOutMin, address[] path, address to, uint256 deadline) returns (uint256)",
+];
+const DEX_ERC20_ABI = [
+  "function balanceOf(address) view returns (uint256)",
+  "function allowance(address,address) view returns (uint256)",
+  "function approve(address,uint256) returns (bool)",
+  "function faucet()",
+];
+
+function dexToken(sym) {
+  const t = DEX_TOKENS[String(sym || "").toUpperCase()];
+  if (!t) throw new Error(`unknown token "${sym}" — one of: ${Object.keys(DEX_TOKENS).join(", ")}`);
+  return { symbol: String(sym).toUpperCase(), ...t };
+}
+function dexPath(fromSym, toSym) {
+  const F = dexToken(fromSym), T = dexToken(toSym);
+  if (F.symbol === T.symbol) throw new Error("cannot swap a token for itself.");
+  const direct = DEX_DIRECT.some(([a, b]) => (a === F.symbol && b === T.symbol) || (a === T.symbol && b === F.symbol));
+  return { F, T, path: direct ? [F.address, T.address] : [F.address, DEX_TOKENS.USDT.address, T.address] };
+}
+
+server.tool(
+  "autyon_quote",
+  "Price a swap on AutyonSwap without trading: how much `to` you would get for `amount` of `from`. Tokens: AUT (native), USDT, USDC, ETH, BTC. Pools sit at real-world-ish prices.",
+  {
+    from: z.string().describe("token symbol you would sell"),
+    to: z.string().describe("token symbol you would buy"),
+    amount: z.string().describe("amount of `from`, e.g. \"100\""),
+  },
+  async ({ from, to, amount }) => {
+    const { F, T, path } = dexPath(from, to);
+    const router = new Contract(DEX_ROUTER, DEX_ROUTER_ABI, provider);
+    const amounts = await router.getAmountsOut(parseUnits(String(amount), F.decimals), path);
+    const out = formatUnits(amounts[amounts.length - 1], T.decimals);
+    const route = path.length === 3 ? `${F.symbol} -> USDT -> ${T.symbol}` : `${F.symbol} -> ${T.symbol}`;
+    return { content: [{ type: "text", text: `${amount} ${F.symbol} ≈ ${out} ${T.symbol}\nRoute: ${route}\nTrade it with autyon_swap.` }] };
+  }
+);
+
+server.tool(
+  "autyon_swap",
+  "Swap tokens on AutyonSwap (the agent DeFi sandbox). Native AUT is handled automatically. Selling AUT counts toward the owner's per-tx and daily spending caps; slippage is bounded (default 1%).",
+  {
+    from: z.string().describe("token to sell: AUT, USDT, USDC, ETH or BTC"),
+    to: z.string().describe("token to buy"),
+    amount: z.string().describe("amount of `from` to sell, e.g. \"10\""),
+    slippage_pct: z.string().optional().describe("max slippage percent, default \"1\""),
+  },
+  async ({ from, to, amount, slippage_pct }) => withLock(async () => {
+    const { F, T, path } = dexPath(from, to);
+    let amountIn;
+    try { amountIn = parseUnits(String(amount), F.decimals); } catch { throw new Error(`"${amount}" is not a valid ${from} amount.`); }
+    if (amountIn <= 0n) throw new Error("amount must be greater than zero.");
+    const slip = Number(slippage_pct ?? 1);
+    if (!Number.isFinite(slip) || slip < 0 || slip > 10) throw new Error("slippage_pct must be between 0 and 10.");
+
+    // Spending AUT is spending — the owner's caps apply exactly as for payments.
+    if (F.native) {
+      const pol = policy();
+      if (amountIn > parseEther(String(pol.perTxMaxAUT)))
+        throw new Error(`POLICY: selling ${amount} AUT exceeds the per-transaction cap of ${pol.perTxMaxAUT} AUT.`);
+      const spent = BigInt(spendToday().spentWei);
+      if (spent + amountIn > parseEther(String(pol.dailyMaxAUT)))
+        throw new Error(`POLICY: this swap would exceed the daily cap of ${pol.dailyMaxAUT} AUT (already spent ${formatEther(spent)} AUT today).`);
+    }
+
+    const router = new Contract(DEX_ROUTER, DEX_ROUTER_ABI, signer);
+    const amounts = await router.getAmountsOut(amountIn, path);
+    const expected = amounts[amounts.length - 1];
+    const minOut = expected * BigInt(Math.floor((100 - slip) * 100)) / 10000n;
+    const deadline = Math.floor(Date.now() / 1000) + 900;
+
+    if (!F.native) {
+      const erc = new Contract(F.address, DEX_ERC20_ABI, signer);
+      const allowance = await erc.allowance(signer.address, DEX_ROUTER);
+      if (allowance < amountIn) {
+        const txA = await erc.approve(DEX_ROUTER, amountIn * 2n, GAS);
+        await waitTx(txA);
+      }
+    }
+
+    if (F.native) recordSpend(amountIn); // reserve before broadcasting
+    let tx;
+    try {
+      if (F.native) {
+        tx = await router.swapExactAUTForTokens(minOut, path, signer.address, deadline, { value: amountIn, ...GAS });
+      } else if (T.native) {
+        tx = await router.swapExactTokensForAUT(amountIn, minOut, path, signer.address, deadline, GAS);
+      } else {
+        tx = await router.swapExactTokensForTokens(amountIn, minOut, path, signer.address, deadline, GAS);
+      }
+      await waitTx(tx);
+    } catch (e) {
+      if (F.native) recordSpend(-amountIn); // refund the reservation on failure
+      throw e;
+    }
+    const route = path.length === 3 ? `${F.symbol} -> USDT -> ${T.symbol}` : `${F.symbol} -> ${T.symbol}`;
+    return { content: [{ type: "text", text:
+      `Swapped ${amount} ${F.symbol} for ~${formatUnits(expected, T.decimals)} ${T.symbol} (route ${route}, max slippage ${slip}%).\nTx: ${SCAN}/tx/${tx.hash}\nSee it live: https://swap.autyon.io/activity` }] };
+  })
+);
+
+server.tool(
+  "autyon_balances",
+  "All AutyonSwap sandbox token balances for this agent (AUT, USDT, USDC, ETH, BTC).",
+  {},
+  async () => {
+    const lines = [`AUT: ${formatEther(await provider.getBalance(signer.address))} (native)`];
+    for (const [sym, t] of Object.entries(DEX_TOKENS)) {
+      if (t.native) continue;
+      try {
+        const bal = await new Contract(t.address, DEX_ERC20_ABI, provider).balanceOf(signer.address);
+        lines.push(`${sym}: ${formatUnits(bal, t.decimals)}`);
+      } catch { lines.push(`${sym}: (read failed)`); }
+    }
+    return { content: [{ type: "text", text: lines.join("\n") + `\nMint test tokens with autyon_token_faucet.` }] };
+  }
+);
+
+server.tool(
+  "autyon_token_faucet",
+  "Mint free test tokens (USDT, USDC, ETH or BTC) from the token's public faucet. Testnet only. For AUT itself, use autyon_faucet.",
+  { symbol: z.string().describe("USDT, USDC, ETH or BTC") },
+  async ({ symbol }) => withLock(async () => {
+    const t = dexToken(symbol);
+    if (t.native) throw new Error("AUT comes from autyon_faucet, not a token faucet.");
+    const tx = await new Contract(t.address, DEX_ERC20_ABI, signer).faucet(GAS);
+    await waitTx(tx);
+    return { content: [{ type: "text", text: `Minted test ${t.symbol}.\nTx: ${SCAN}/tx/${tx.hash}` }] };
+  })
+);
+
+/* ---------------- public task market (OpenJobBoard) ---------------- */
+
+const boardR = () => new Contract(BOARD, BOARD_ABI, provider);
+
+async function marketPosts() {
+  // Briefs live in PostCreated events; the explorer indexes them (RPC caps ranges).
+  const iface = boardR().interface;
+  const topic0 = iface.getEvent("PostCreated").topicHash;
+  const r = await fetchT(`${SCAN}/api?module=logs&action=getLogs&fromBlock=0&toBlock=latest&address=${BOARD}&topic0=${topic0}`, 12000);
+  const j = await r.json();
+  const out = [];
+  for (const l of Array.isArray(j?.result) ? j.result : []) {
+    try {
+      const p = iface.parseLog({ topics: l.topics.filter(Boolean), data: l.data });
+      out.push({ postId: p.args.postId.toString(), poster: p.args.poster, budget: p.args.budget,
+        minStake: p.args.minStake, claimBy: Number(p.args.claimBy), brief: p.args.brief });
+    } catch {}
+  }
+  return out.reverse(); // newest first
+}
+
+server.tool(
+  "autyon_market",
+  "Browse the public task market (market.autyon.io). Lists open posts anyone can claim: brief, escrowed budget, required stake, claim bond and time left. Claim one with autyon_claim_task.",
+  { all: z.boolean().optional().describe("include non-open posts too") },
+  async ({ all }) => {
+    const posts = await marketPosts();
+    const b = boardR();
+    const now = Math.floor(Date.now() / 1000);
+    const lines = [];
+    for (const p of posts.slice(0, 25)) {
+      let st = "?", bond = 0n;
+      try { const g = await b.getPost(p.postId); st = POST_STATUS[Number(g.status)] || "?"; } catch {}
+      const open = st === "open" && now <= p.claimBy;
+      if (!open && !all) continue;
+      if (open) { try { bond = await b.bondFor(p.postId); } catch {} }
+      lines.push(
+        `#${p.postId} · ${st}${open ? ` · closes in ${humanDuration(p.claimBy - now)}` : ""}\n` +
+        `  "${p.brief.length > 120 ? p.brief.slice(0, 120) + "…" : p.brief}"\n` +
+        `  budget ${formatEther(p.budget)} AUT · min stake ${formatEther(p.minStake)} AUT` +
+        (open ? ` · claim bond ${formatEther(bond)} AUT` : "")
+      );
+    }
+    if (!lines.length) return { content: [{ type: "text", text: all ? "No posts on the board yet." : "No open tasks right now. Post one with autyon_post_task, or pass all=true to see history." }] };
+    return { content: [{ type: "text", text: lines.join("\n\n") + `\n\nBoard: market.autyon.io` }] };
+  }
+);
+
+server.tool(
+  "autyon_post_task",
+  "Post a task to the public market with an escrowed AUT budget. Any qualified agent can claim it (posting a bond), do the work and deliver; you then release payment. The budget counts against the owner's spend caps.",
+  {
+    brief: z.string().describe("what needs to be done — this exact text is the on-chain contract the worker and any arbiter read"),
+    budget: z.string().describe("AUT to escrow as the payment, e.g. \"1\""),
+    hours: z.string().optional().describe("work deadline in hours once claimed (default 24)"),
+    claim_hours: z.string().optional().describe("how long the post stays claimable (default 48)"),
+    min_stake: z.string().optional().describe("AUT a claimer (or their owner) must have staked (default 0)"),
+  },
+  async ({ brief, budget, hours, claim_hours, min_stake }) => withLock(async () => {
+    if (!brief || brief.trim().length < 10) throw new Error("write a real brief — it is the contract the worker is held to.");
+    let wei;
+    try { wei = parseEther(budget); } catch { throw new Error(`"${budget}" is not a valid AUT amount.`); }
+    if (wei <= 0n) throw new Error(`budget must be greater than zero.`);
+    const h = hours ? Number(hours) : 24;
+    const ch = claim_hours ? Number(claim_hours) : 48;
+    if (!Number.isFinite(h) || h <= 0 || !Number.isFinite(ch) || ch <= 0) throw new Error("hours and claim_hours must be positive numbers.");
+    let ms = 0n;
+    if (min_stake) { try { ms = parseEther(min_stake); } catch { throw new Error(`"${min_stake}" is not a valid AUT amount.`); } }
+    const pol = policy();
+    if (wei > parseEther(String(pol.perTxMaxAUT)))
+      throw new Error(`POLICY: a ${budget} AUT budget exceeds the per-tx cap of ${pol.perTxMaxAUT} AUT. Raise it in Settings.`);
+    if (BigInt(spendToday().spentWei) + wei > parseEther(String(pol.dailyMaxAUT)))
+      throw new Error(`POLICY: this would exceed today's daily cap of ${pol.dailyMaxAUT} AUT.`);
+    const bal = await provider.getBalance(signer.address);
+    if (bal < wei + parseEther("0.01")) throw new Error(`need ${budget} AUT + gas; balance is ${formatEther(bal)} AUT.`);
+    recordSpend(wei);
+    let tx, postId = "?";
+    try {
+      const b = new Contract(BOARD, BOARD_ABI, signer);
+      tx = await b.postJob(brief, BigInt(Math.round(h * 3600)), BigInt(Math.round(ch * 3600)), ms, { value: wei, ...GAS });
+      const rc = await waitTx(tx);
+      for (const l of rc.logs) {
+        try { const p = b.interface.parseLog(l); if (p && p.name === "PostCreated") { postId = p.args.postId.toString(); break; } } catch {}
+      }
+    } catch (e) { recordSpend(-wei); throw e; }
+    return { content: [{ type: "text", text:
+      `Posted task #${postId} — ${budget} AUT escrowed, claimable for ${ch}h, ${h}h of work time once claimed.\n` +
+      `Watch it at market.autyon.io/task/${postId}. When the worker delivers, release with autyon_release_task(${postId}).\nTx: ${SCAN}/tx/${tx.hash}` }] };
+  })
+);
+
+server.tool(
+  "autyon_claim_task",
+  "Claim an open task from the public market. Requires the post's min stake and attaches a refundable bond (20% of budget, capped at 5 AUT — returned when the job settles, forfeited to the poster if you ghost). The bond counts against the owner's spend caps. After claiming, do the work and use autyon_deliver with the returned escrow job id.",
+  { post_id: z.string() },
+  async ({ post_id }) => withLock(async () => {
+    const b = boardR();
+    const g = await b.getPost(BigInt(post_id));
+    const st = POST_STATUS[Number(g.status)] || "?";
+    if (st !== "open") throw new Error(`post #${post_id} is ${st}, not open.`);
+    if (Math.floor(Date.now() / 1000) > Number(g.claimBy)) throw new Error(`the claim window for post #${post_id} has closed.`);
+    if (g.poster.toLowerCase() === signer.address.toLowerCase()) throw new Error(`you posted this task — you cannot claim your own post.`);
+    const myStake = await b.effectiveStake(signer.address);
+    if (myStake < g.minStake)
+      throw new Error(`post #${post_id} requires ${formatEther(g.minStake)} AUT staked; you have ${formatEther(myStake)}. Stake with autyon_stake first.`);
+    const bond = await b.bondFor(BigInt(post_id));
+    const pol = policy();
+    if (bond > parseEther(String(pol.perTxMaxAUT)))
+      throw new Error(`POLICY: the ${formatEther(bond)} AUT claim bond exceeds the per-tx cap of ${pol.perTxMaxAUT} AUT.`);
+    if (BigInt(spendToday().spentWei) + bond > parseEther(String(pol.dailyMaxAUT)))
+      throw new Error(`POLICY: the ${formatEther(bond)} AUT bond would exceed today's daily cap of ${pol.dailyMaxAUT} AUT.`);
+    const bal = await provider.getBalance(signer.address);
+    if (bal < bond + parseEther("0.01")) throw new Error(`need ${formatEther(bond)} AUT bond + gas; balance is ${formatEther(bal)} AUT.`);
+    recordSpend(bond);
+    let tx, jobId = "?";
+    try {
+      const bw = new Contract(BOARD, BOARD_ABI, signer);
+      tx = await bw.claim(BigInt(post_id), { value: bond, ...GAS });
+      const rc = await waitTx(tx);
+      for (const l of rc.logs) {
+        try { const p = bw.interface.parseLog(l); if (p && p.name === "PostClaimed") { jobId = p.args.jobId.toString(); break; } } catch {}
+      }
+    } catch (e) { recordSpend(-bond); throw e; }
+    const posts = await marketPosts().catch(() => []);
+    const brief = posts.find((p) => p.postId === String(post_id))?.brief || "(brief in PostCreated event)";
+    return { content: [{ type: "text", text:
+      `Claimed post #${post_id} — the ${formatEther(g.budget)} AUT budget is now escrowed to you (job #${jobId}), bond ${formatEther(bond)} AUT held.\n` +
+      `The contract you signed up for:\n"${brief}"\n` +
+      `Do the work, then autyon_deliver(${jobId}, proof). After the poster releases (or the deadline passes), autyon_settle_task(${post_id}) returns your bond.\nTx: ${SCAN}/tx/${tx.hash}` }] };
+  })
+);
+
+server.tool(
+  "autyon_release_task",
+  "As the POSTER of a market task: accept the delivered work and release the escrowed budget to the worker. Their bond is returned in the same transaction.",
+  { post_id: z.string() },
+  async ({ post_id }) => withLock(async () => {
+    const tx = await new Contract(BOARD, BOARD_ABI, signer).release(BigInt(post_id), GAS);
+    await waitTx(tx);
+    return { content: [{ type: "text", text: `Released post #${post_id} — payment sent to the worker, their bond returned.\nTx: ${SCAN}/tx/${tx.hash}` }] };
+  })
+);
+
+server.tool(
+  "autyon_settle_task",
+  "Settle a market post after its escrow reached a terminal state via timeout paths (auto-release or refund): returns the worker's bond, or refunds the poster. Anyone may call it; it moves funds only to their contractual owners.",
+  { post_id: z.string() },
+  async ({ post_id }) => withLock(async () => {
+    const tx = await new Contract(BOARD, BOARD_ABI, signer).settle(BigInt(post_id), GAS);
+    await waitTx(tx);
+    return { content: [{ type: "text", text: `Settled post #${post_id} — bond and any refund moved to their owners.\nTx: ${SCAN}/tx/${tx.hash}` }] };
+  })
+);
+
+server.tool(
+  "autyon_claim_rewards",
+  "Claim accrued staking rewards from AutyonStakingNative into this agent's balance.",
+  {},
+  async () => withLock(async () => {
+    const stkR = new Contract(STAKING, STAKING_ABI, provider);
+    const rew = await stkR.earned(signer.address);
+    if (rew === 0n) return { content: [{ type: "text", text: "No staking rewards accrued yet." }] };
+    const tx = await new Contract(STAKING, STAKING_ABI, signer).claim(GAS);
+    await waitTx(tx);
+    return { content: [{ type: "text", text: `Claimed ${formatEther(rew)} AUT of staking rewards.\nTx: ${SCAN}/tx/${tx.hash}` }] };
+  })
 );
 
 /* ---------------- start ---------------- */

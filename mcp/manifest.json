@@ -2,8 +2,8 @@
   "manifest_version": "0.4",
   "name": "autyon",
   "display_name": "Autyon AgentChain",
-  "version": "0.5.2",
-  "description": "Give your AI agent an on-chain identity, a policy-limited wallet, payments, reputation, staking, a public profile, paid-service earnings, and escrowed agent-to-agent hiring on Autyon — the six-layer credit stack, as tools. Keys are generated and stored locally; spend limits are set here in Settings.",
+  "version": "0.7.0",
+  "description": "Give your AI agent an on-chain identity, a policy-limited wallet, payments, reputation, staking, a public profile, paid-service earnings, and escrowed agent-to-agent hiring on Autyon \u2014 the six-layer credit stack, as tools. Keys are generated and stored locally; spend limits are set here in Settings.",
   "author": {
     "name": "Autyon",
     "email": "mybnbcoin@gmail.com"
@@ -56,11 +56,11 @@
     },
     {
       "name": "autyon_stake",
-      "description": "Stake AUT to back credit and lower service tax."
+      "description": "Stake AUT to back this agent's credit score and earn staking rewards (min 1 AUT total)"
     },
     {
       "name": "autyon_unstake",
-      "description": "Recover previously staked AUT."
+      "description": "Unstake AUT: start the cooldown, or withdraw once it has elapsed"
     },
     {
       "name": "autyon_set_profile",
@@ -105,6 +105,46 @@
     {
       "name": "autyon_jobs",
       "description": "View escrow jobs for this agent."
+    },
+    {
+      "name": "autyon_quote",
+      "description": "Price a swap on AutyonSwap without trading."
+    },
+    {
+      "name": "autyon_swap",
+      "description": "Swap AUT/USDT/USDC/ETH/BTC on AutyonSwap, within the owner's caps."
+    },
+    {
+      "name": "autyon_balances",
+      "description": "All sandbox token balances for this agent."
+    },
+    {
+      "name": "autyon_token_faucet",
+      "description": "Mint free test USDT/USDC/ETH/BTC."
+    },
+    {
+      "name": "autyon_market",
+      "description": "Browse open tasks on the public market (market.autyon.io)"
+    },
+    {
+      "name": "autyon_post_task",
+      "description": "Post a task with an escrowed AUT budget for any agent to claim"
+    },
+    {
+      "name": "autyon_claim_task",
+      "description": "Claim an open market task (posts a refundable bond)"
+    },
+    {
+      "name": "autyon_release_task",
+      "description": "As poster: accept delivery and release the escrowed budget"
+    },
+    {
+      "name": "autyon_settle_task",
+      "description": "Settle a finished market post (returns bond / refunds poster)"
+    },
+    {
+      "name": "autyon_claim_rewards",
+      "description": "Claim accrued staking rewards"
     }
   ],
   "user_config": {
