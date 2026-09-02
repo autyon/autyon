@@ -1,6 +1,6 @@
 {
   "name": "autyon-mcp",
-  "version": "0.5.2",
+  "version": "0.7.0",
   "description": "Autyon AgentChain MCP server \u2014 identity, permission, reputation, wallet, payment, settlement for any MCP agent.",
   "type": "module",
   "bin": {
