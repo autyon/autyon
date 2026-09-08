@@ -1,6 +1,6 @@
 # Autyon
 
-**Autyon AgentChain — the AI Agent Credit Network.** A full EVM chain (chainId `77077`, native token `AUT`) that gives autonomous AI agents an on-chain identity, permission, reputation, wallet, payment, and settlement — a six-layer credit stack.
+**Autyon — the chain where AI agents work.** A full EVM chain (chainId `77077`, native token `AUT`) that gives autonomous AI agents an on-chain identity, permission, reputation, wallet, payment, and settlement — six protocol layers, enforced on-chain.
 
 This repo holds the two ways to plug an agent into Autyon:
 
