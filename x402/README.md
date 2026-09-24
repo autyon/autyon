@@ -1,27 +1,27 @@
 # @autyon/x402
 
-**Charge AUT per API call, verified on-chain.** An [x402](https://autyon.io/docs)-style "pay to call" gateway for Autyon service agents: wrap any Express route in a paywall, and it only runs after the caller has paid your agent on-chain.
+Express middleware that charges AUT per request. The route handler runs only after the caller has paid the service agent on chain and proved it.
 
-Autyon already has the payment rail (`ServicePayment.payAgent`) and receipts (`ServicePaid`). This package adds the missing HTTP layer.
+Autyon already has the payment call (`ServicePayment.payAgent`) and the receipt event (`ServicePaid`). This package is the HTTP layer on top.
 
-## How it works
+## Flow
 
 ```
-Client                         Gateway                         Autyon chain
-  │   GET /premium                 │                                │
-  │ ─────────────────────────────▶│                                │
-  │   402 { agentId, priceWei,     │                                │
-  │        requestId, payTo }      │                                │
-  │ ◀─────────────────────────────│                                │
-  │   payAgent(agentId,[0,0,0],requestId) value≥price ────────────▶│  ServicePaid
-  │ ◀──────────── txHash ──────────────────────────────────────────│
-  │   sign(requestId) with paying key                               │
-  │   GET /premium                 │                                │
-  │   X-Autyon-RequestId, -Tx, -Sig│  verify receipt: agentId +     │
-  │ ──────────────────────────────▶│  requestId match, gross≥price, │
-  │                                │  sig==payer, single-use ──────▶│ (read)
-  │   200 { your data }            │                                │
-  │ ◀─────────────────────────────│                                │
+Client                         Gateway                         Chain
+  |  GET /premium                  |                               |
+  |------------------------------->|                               |
+  |  402 { agentId, priceWei,      |                               |
+  |        requestId, payTo }      |                               |
+  |<-------------------------------|                               |
+  |  payAgent(agentId,[0,0,0],requestId) value >= price ---------->|  ServicePaid
+  |<------------- txHash ------------------------------------------|
+  |  sign(requestId) with the paying key                           |
+  |  GET /premium + X-Autyon-RequestId, X-Autyon-Tx, X-Autyon-Sig  |
+  |------------------------------->|  read receipt, check agentId, |
+  |                                |  requestId, amount, signer,   |
+  |                                |  mark requestId used -------->|  (read)
+  |  200 { data }                  |                               |
+  |<-------------------------------|                               |
 ```
 
 ## Server
@@ -33,57 +33,64 @@ import { autyonPaywall } from "@autyon/x402";
 const app = express();
 
 app.get("/premium",
-  autyonPaywall({ agentId: 1, priceAUT: "0.1" }),  // agentId from `autyon go-pro`
+  autyonPaywall({ agentId: 1, priceAUT: "0.1" }),
   (req, res) => res.json({ answer: 42, paidWith: req.autyonPayment })
 );
 
 app.listen(8402);
 ```
 
-The route body runs only on a verified, unused payment. `req.autyonPayment` holds `{ requestId, txHash, agentId }`.
+`agentId` is the AgentRegistry id you got from `autyon go-pro`. On a verified, unused payment the handler runs with `req.autyonPayment = { requestId, txHash, payer, agentId }`.
 
-### Options
+Options:
 
 | Option | Default | Meaning |
 |---|---|---|
-| `agentId` | — | your service agent's AgentRegistry id (required) |
-| `priceAUT` | — | price per call in AUT, e.g. `"0.1"` (required) |
+| `agentId` | required | service agent id |
+| `priceAUT` | required | price per call, e.g. `"0.1"` |
 | `rpc` | `https://rpc.autyon.io` | RPC endpoint |
 | `ttlMs` | `600000` | how long a challenge stays payable |
-| `store` | in-memory | `{ put, get, consume }` — use Redis for multi-instance |
+| `store` | in-memory | `{ put, get, consume }`; use Redis or similar for more than one instance |
 
-> The default store is in-memory. For multiple gateway instances (or restarts), pass a shared/persistent `store`, otherwise a paid `requestId` issued by one instance can't be verified by another.
+The default store is process memory. With several gateway instances, or across restarts, a `requestId` issued by one process is unknown to the others, so pass a shared store whose `consume` is atomic (Redis `SET NX` with a TTL works).
 
 ## Client
 
-The [`@autyon/sdk`](../sdk) does the 402 → pay → sign → retry automatically. Because the
-server dictates the price, cap it:
+`@autyon/sdk` handles the 402, pays, signs and retries. The server sets the price, so cap what you are willing to pay:
 
 ```js
-import { AutyonClient, ADDR } from "@autyon/sdk";
+import { AutyonClient } from "@autyon/sdk";
 import { parseEther } from "ethers";
+
 const autyon = new AutyonClient({ privateKey: process.env.AGENT_KEY });
 
 const res = await autyon.x402Fetch("https://api.example.com/premium", {}, {
-  maxPriceWei: parseEther("1"),   // never pay more than 1 AUT for a call
-  allowAgentIds: [1],             // (optional) only pay these agents
+  maxPriceWei: parseEther("1"),
+  allowAgentIds: [1],
 });
 console.log(await res.json());
 ```
 
-## Security
+## What the gateway checks
 
-- **Issued-id only.** The `requestId` must be one the gateway issued (random 32 bytes) and unexpired — a caller can't forge or pre-pay a made-up id.
-- **On-chain proof.** The proof tx must be mined, emitted by the real `ServicePayment` contract, and carry a `ServicePaid` log whose `agentId` + `requestId` match and whose `grossAmount` ≥ the price.
-- **Payer-bound.** `requestId` and the tx hash are public on-chain, so possession alone must not grant access. Redemption requires an `X-Autyon-Sig` signature of the `requestId` by the paying key; the gateway checks it against the `ServicePaid.payer`. A front-runner who only read the chain cannot sign it.
-- **Single-use, path-bound.** Each `requestId` is consumed atomically (compare-and-set) and bound to the request path — no replay under concurrency, and a payment for one resource can't unlock another.
-- **Client price cap.** `x402Fetch` refuses to pay above `maxPriceWei` / outside `allowAgentIds`, so a malicious server can't drain the caller.
+The `requestId` must be one this gateway issued (32 random bytes) and still inside `ttlMs`. A caller cannot pay against a made-up id.
 
-### Known limitations (before value-bearing use)
-- Default `store` is in-memory (evicts expired, capped). For multiple instances or restarts, pass a shared/atomic store (Redis with `SET NX` + TTL), or a paid `requestId` from one instance can't be verified by another.
-- If a caller pays **after** the challenge TTL (default 10 min) expires, that payment is unrecoverable — redeem promptly.
-- No confirmation-depth / reorg protection: a tx that confirms then reorgs out was already served. Require N confirmations for real value.
+The transaction must be mined, emitted by the real `ServicePayment` contract, and carry a `ServicePaid` log whose `agentId` and `requestId` match and whose `grossAmount` is at least the price.
+
+`requestId` and the tx hash are both public on chain, so knowing them proves nothing. The caller must also send `X-Autyon-Sig`, a signature of the `requestId` by the paying key, and the gateway checks the signer against `ServicePaid.payer`.
+
+Each `requestId` is consumed with a compare-and-set and is bound to the request path. A receipt cannot be replayed and a payment for one route cannot unlock another.
+
+On the client side `x402Fetch` refuses prices above `maxPriceWei` and agents outside `allowAgentIds`.
+
+## Limitations
+
+The in-memory store evicts expired entries and is capped, but it is per process. See the note under options.
+
+A payment that lands after the challenge TTL is not refunded by the gateway. Pay promptly after receiving the 402.
+
+There is no confirmation-depth check. A transaction that is mined and later reorged out has already been served. For real value, require N confirmations before serving.
 
 Testnet, chainId 77077. Testnet AUT has no monetary value.
 
-MIT © Autyon
+MIT

@@ -1,15 +1,4 @@
 #!/usr/bin/env node
-// autyon — command-line access to an Autyon agent wallet.
-//
-//   autyon whoami
-//   autyon pay wen.agent 0.1 "thanks"
-//   autyon hire data.agent 1 24
-//
-// Key resolution (first that exists):
-//   1. --key 0x...            (flag)
-//   2. $AUTYON_KEY            (env)
-//   3. ~/.autyon/agent.key    (same file the Autyon MCP uses — so CLI + MCP share one agent)
-// `autyon init` generates that file if it does not exist.
 
 import fs from "node:fs";
 import path from "node:path";
@@ -35,13 +24,13 @@ function loadKey(flags, { required = true } = {}) {
   if (process.env.AUTYON_KEY) return process.env.AUTYON_KEY;
   if (fs.existsSync(KEY_FILE)) return fs.readFileSync(KEY_FILE, "utf8").trim();
   if (!required) return null;
-  console.error("No agent key found. Run `autyon init` to create one, or set AUTYON_KEY / pass --key=0x…");
+  console.error("No agent key found. Run `autyon init` to create one, or set AUTYON_KEY / pass --key=0x...");
   process.exit(1);
 }
 
 function out(obj) { console.log(typeof obj === "string" ? obj : JSON.stringify(obj, null, 2)); }
 
-const HELP = `autyon — Autyon AgentChain CLI
+const HELP = `autyon: Autyon AgentChain CLI
 
   autyon init                         create a local agent key (~/.autyon/agent.key)
   autyon whoami                       identity, balance, credit score
@@ -69,7 +58,7 @@ const HELP = `autyon — Autyon AgentChain CLI
   autyon balances                     all sandbox token balances
   autyon token-faucet <symbol>        mint test USDT/USDC/ETH/BTC
 
-Flags: --key=0x…  --rpc=…   Env: AUTYON_KEY`;
+Flags: --key=0x...  --rpc=...   Env: AUTYON_KEY`;
 
 async function main() {
   const [cmd, ...rest] = process.argv.slice(2);

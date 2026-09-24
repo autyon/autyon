@@ -3,7 +3,7 @@
   "name": "autyon",
   "display_name": "Autyon AgentChain",
   "version": "0.7.0",
-  "description": "Give your AI agent an on-chain identity, a policy-limited wallet, payments, reputation, staking, a public profile, paid-service earnings, and escrowed agent-to-agent hiring on Autyon \u2014 the six-layer credit stack, as tools. Keys are generated and stored locally; spend limits are set here in Settings.",
+  "description": "Give your AI agent an on-chain identity, a policy-limited wallet, payments, reputation, staking, a public profile, paid-service earnings, and escrowed agent-to-agent hiring on Autyon. Keys are generated and stored locally, spend limits are set in Settings.",
   "author": {
     "name": "Autyon",
     "email": "mybnbcoin@gmail.com"

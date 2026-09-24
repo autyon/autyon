@@ -1,13 +1,4 @@
-// client.js — AutyonClient: a typed wrapper over Autyon's on-chain agent primitives.
-//
-//   import { AutyonClient } from "@autyon/sdk";
-//   const autyon = new AutyonClient({ privateKey: process.env.AGENT_KEY });
-//   await autyon.whoami();
-//
-// The caller holds the key, so there is no policy/cap layer here (that belongs to
-// the MCP, where an LLM is an untrusted caller). Methods return structured data;
-// every state-changing call resolves after the tx is mined and includes txHash + a
-// block-explorer URL.
+
 
 import {
   JsonRpcProvider, Wallet, Contract, parseEther, formatEther, parseUnits, formatUnits,
@@ -18,7 +9,7 @@ import {
   DEX, DEX_TOKENS, DEX_DIRECT_PAIRS, DEX_ROUTER_ABI, DEX_ERC20_ABI,
 } from "./contracts.js";
 
-const GAS = { gasPrice: 1_000_000_000n }; // flat 1 gwei, zeroBaseFee chain
+const GAS = { gasPrice: 1_000_000_000n };
 const TX_TIMEOUT_MS = 120_000;
 const ZERO32 = "0x" + "0".repeat(64);
 
@@ -40,12 +31,6 @@ function humanDuration(secs) {
 }
 
 export class AutyonClient {
-  /**
-   * @param {object} opts
-   * @param {string} opts.privateKey  0x-prefixed private key of the agent wallet.
-   * @param {string} [opts.rpc]       RPC URL (default https://rpc.autyon.io).
-   * @param {string} [opts.api]       Name-service API (default https://api.autyon.io).
-   */
   constructor({ privateKey, rpc = DEFAULT_RPC, api = DEFAULT_API } = {}) {
     if (!privateKey) throw new Error("AutyonClient requires a privateKey.");
     this.provider = new JsonRpcProvider(rpc, CHAIN_ID, { staticNetwork: true });
@@ -54,7 +39,6 @@ export class AutyonClient {
     this.address = this.signer.address;
   }
 
-  /** Generate a fresh random wallet; returns { address, privateKey }. */
   static createWallet() {
     const w = Wallet.createRandom();
     return { address: w.address, privateKey: w.privateKey };
@@ -66,8 +50,6 @@ export class AutyonClient {
   async _wait(tx) { return tx.wait(1, TX_TIMEOUT_MS); }
   txUrl(h) { return `${SCAN}/tx/${h}`; }
   addressUrl(a) { return `${SCAN}/address/${a}`; }
-
-  // ---------- reads ----------
 
   async balance(address = this.address) { return formatEther(await this.provider.getBalance(address)); }
 
@@ -139,7 +121,6 @@ export class AutyonClient {
     return { name, owner, ...rep };
   }
 
-  /** On-chain-authoritative resolution used before moving funds. */
   async _resolveTo(target) {
     if (isAddress(target)) return { address: target, name: null };
     const label = clean(target);
@@ -214,8 +195,6 @@ export class AutyonClient {
     };
   }
 
-  // ---------- writes ----------
-
   async registerIdentity(label) {
     const l = clean(label);
     if (!validLabel(l)) throw new Error(`"${label}" is not a valid .agent label (3-63 chars, a-z 0-9 -, no leading/trailing/double hyphen, no 0x-).`);
@@ -233,8 +212,6 @@ export class AutyonClient {
     const wei = parseEther(String(amount));
     if (wei <= 0n) throw new Error("amount must be greater than zero.");
     const dest = await this._resolveTo(to);
-    // No fixed gasLimit: a .agent name can resolve to a contract wallet, whose
-    // receive()/fallback costs more than 21000 — let the node estimate.
     const tx = await this.signer.sendTransaction({ to: dest.address, value: wei, ...GAS });
     await this._wait(tx);
     let logTx = null;
@@ -293,9 +270,6 @@ export class AutyonClient {
     return { tx: tx.hash };
   }
 
-  // ---------- x402: pay to call a service ----------
-
-  /** Pay a registered service agent for one call. `requestId` is a 32-byte hex string. */
   async payForCall(agentId, amountAUT, requestId) {
     if (!/^0x[0-9a-fA-F]{64}$/.test(String(requestId))) throw new Error("requestId must be a 0x 32-byte hex string.");
     const tx = await this._c("service", true).payAgent(
@@ -305,19 +279,10 @@ export class AutyonClient {
     return { agentId: String(agentId), requestId, amountAUT: String(amountAUT), tx: tx.hash };
   }
 
-  /**
-   * Fetch an x402-protected URL. On HTTP 402 it reads the { agentId, priceWei, requestId }
-   * challenge, pays on-chain, signs the requestId, and retries with proof headers.
-   * @param {string} url
-   * @param {RequestInit} [init]
-   * @param {object} [opts]
-   * @param {bigint|string} [opts.maxPriceWei]  refuse to pay more than this (in wei).
-   * @param {Array<string|number>} [opts.allowAgentIds]  only pay these agent ids.
-   */
   async x402Fetch(url, init = {}, opts = {}) {
     const ms = opts.timeoutMs ?? 30_000;
     const timed = (u, i = {}) => {
-      if (i.signal) return fetch(u, i);                 // caller controls its own signal
+      if (i.signal) return fetch(u, i);
       const ac = new AbortController();
       const t = setTimeout(() => ac.abort(), ms);
       return fetch(u, { ...i, signal: ac.signal }).finally(() => clearTimeout(t));
@@ -327,22 +292,19 @@ export class AutyonClient {
     const ch = await res.json().catch(() => ({}));
     const { agentId, priceWei, requestId } = ch;
     if (agentId == null || priceWei == null || !requestId) throw new Error("x402: malformed 402 challenge from server.");
-    // The server dictates price + agentId, so guard before spending.
     if (opts.maxPriceWei != null && BigInt(priceWei) > BigInt(opts.maxPriceWei))
       throw new Error(`x402: server price ${formatEther(BigInt(priceWei))} AUT exceeds your maxPriceWei.`);
     if (opts.allowAgentIds && !opts.allowAgentIds.map(String).includes(String(agentId)))
       throw new Error(`x402: server agentId ${agentId} is not in allowAgentIds.`);
     const paid = await this.payForCall(agentId, formatEther(BigInt(priceWei)), requestId);
-    const sig = await this.signer.signMessage(requestId); // proves the payer redeems (not a front-runner)
+    const sig = await this.signer.signMessage(requestId);
     const headers = { ...(init.headers || {}), "X-Autyon-RequestId": requestId, "X-Autyon-Tx": paid.tx, "X-Autyon-Sig": sig };
     return timed(url, { ...init, headers });
   }
 
-  // ---------- AutyonSwap (DeFi sandbox) ----------
-
   _dexToken(sym) {
     const t = DEX_TOKENS[String(sym).toUpperCase()];
-    if (!t) throw new Error(`unknown token "${sym}" — one of: ${Object.keys(DEX_TOKENS).join(", ")}`);
+    if (!t) throw new Error(`unknown token "${sym}". One of: ${Object.keys(DEX_TOKENS).join(", ")}`);
     return { symbol: String(sym).toUpperCase(), ...t };
   }
 
@@ -354,7 +316,6 @@ export class AutyonClient {
     return direct ? [F.address, T.address] : [F.address, DEX_TOKENS.USDT.address, T.address];
   }
 
-  /** Quote a swap: how much `to` you get for `amount` of `from`. */
   async quoteSwap(from, to, amount) {
     const F = this._dexToken(from), T = this._dexToken(to);
     const path = this._dexPath(from, to);
@@ -368,13 +329,6 @@ export class AutyonClient {
     };
   }
 
-  /**
-   * Swap on AutyonSwap. Native AUT is handled automatically on either side.
-   * @param {string} from   token symbol (AUT, USDT, USDC, ETH, BTC)
-   * @param {string} to     token symbol
-   * @param {string|number} amount  human units of `from`
-   * @param {object} [opts] { slippagePct = 1 }
-   */
   async swap(from, to, amount, opts = {}) {
     const F = this._dexToken(from), T = this._dexToken(to);
     const path = this._dexPath(from, to);
@@ -413,7 +367,6 @@ export class AutyonClient {
     };
   }
 
-  /** Balances of every sandbox token (plus native AUT). */
   async tokenBalances(address = this.address) {
     const out = { AUT: formatEther(await this.provider.getBalance(address)) };
     for (const [sym, t] of Object.entries(DEX_TOKENS)) {
@@ -426,7 +379,6 @@ export class AutyonClient {
     return out;
   }
 
-  /** Mint test tokens from a token's public faucet() (testnet only). */
   async tokenFaucet(sym) {
     const t = this._dexToken(sym);
     if (t.native) throw new Error("AUT comes from faucet.autyon.io, not a token faucet.");
@@ -434,8 +386,6 @@ export class AutyonClient {
     await this._wait(tx);
     return { minted: t.symbol, tx: tx.hash };
   }
-
-  // ---------- hiring / escrow ----------
 
   async hire(worker, amount, hours = 24) {
     const wei = parseEther(String(amount));

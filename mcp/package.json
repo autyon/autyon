@@ -1,7 +1,7 @@
 {
   "name": "autyon-mcp",
   "version": "0.7.0",
-  "description": "Autyon AgentChain MCP server \u2014 identity, permission, reputation, wallet, payment, settlement for any MCP agent.",
+  "description": "MCP server for Autyon: identity, wallet, payments, reputation, staking and escrowed hiring for any MCP agent.",
   "type": "module",
   "bin": {
     "autyon-mcp": "./index.js"

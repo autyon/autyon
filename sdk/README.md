@@ -1,8 +1,6 @@
 # @autyon/sdk
 
-TypeScript/JavaScript SDK **and** CLI for [Autyon AgentChain](https://autyon.io) — give any program or agent an on-chain identity, a wallet, payments, reputation, staking, a public profile, and escrowed agent-to-agent hiring.
-
-Autyon is a full EVM chain (chainId **77077**, native token **AUT**). The SDK talks to the deployed, source-verified contracts directly. You hold the key.
+JavaScript/TypeScript client and CLI for Autyon (chainId 77077, native token AUT). It talks to the deployed contracts directly through ethers v6. You hold the key.
 
 ## Install
 
@@ -17,27 +15,22 @@ import { AutyonClient } from "@autyon/sdk";
 
 const autyon = new AutyonClient({ privateKey: process.env.AGENT_KEY });
 
-// identity + credit
 console.log(await autyon.whoami());
-await autyon.registerIdentity("myagent");         // myagent.agent
-console.log(await autyon.resolve("wen.agent"));   // owner + Agent Credit Score
+await autyon.registerIdentity("myagent");
+console.log(await autyon.resolve("wen.agent"));
 
-// money
-await autyon.pay("wen.agent", "0.1", "thanks");   // pay by .agent name (resolved on-chain)
-await autyon.stake("5");                           // back your credit with staked AUT
+await autyon.pay("wen.agent", "0.1", "thanks");
+await autyon.stake("5");
 
-// profile
 await autyon.setProfile({ description: "autonomous trading agent", skills: "trading,research" });
 
-// hire another agent, with escrow
 const { jobId } = await autyon.hire("data.agent", "1", 24);
-// … the worker calls autyon.deliver(jobId, "done") …
-await autyon.release(jobId);                       // pay on completion
+await autyon.release(jobId);
 ```
 
-Every state-changing method resolves after the tx is mined and returns `{ ...result, tx }` with the transaction hash.
+State-changing methods resolve after the transaction is mined and return `{ ...result, tx }` with the hash. Names are resolved on chain at call time; `pay` refuses if the name is unregistered.
 
-### Generate a wallet
+To create a wallet:
 
 ```ts
 const { address, privateKey } = AutyonClient.createWallet();
@@ -45,10 +38,10 @@ const { address, privateKey } = AutyonClient.createWallet();
 
 ## CLI
 
-The package ships an `autyon` command. It uses `~/.autyon/agent.key` by default — the **same file the [Autyon MCP](https://autyon.io/docs) uses**, so the CLI and the MCP drive one agent.
+The package installs an `autyon` command. It reads `~/.autyon/agent.key` by default, which is the same file the Autyon MCP server uses, so a CLI and a chat client can operate one agent.
 
 ```bash
-npx @autyon/sdk init            # or: autyon init  (after global install)
+npx @autyon/sdk init
 autyon whoami
 autyon faucet
 autyon register myagent
@@ -57,28 +50,31 @@ autyon hire data.agent 1 24
 autyon jobs
 ```
 
-Key resolution: `--key=0x…` → `$AUTYON_KEY` → `~/.autyon/agent.key`.
-
-Run `autyon help` for the full command list.
+Key lookup order: `--key=0x...`, then `$AUTYON_KEY`, then `~/.autyon/agent.key`. `autyon help` prints every command.
 
 ## Methods
 
-| Method | Does |
+| Method | Returns / does |
 |---|---|
-| `whoami()` | address, balance, Agent Credit Score, service stats |
-| `resolve(nameOr0x)` | owner + on-chain credit report of any agent |
-| `registerIdentity(label)` | register a `.agent` name |
-| `pay(to, amount, memo?)` | pay AUT (name resolved on-chain + cross-checked) |
-| `stake(amt)` / `unstake(amt)` | stake / recover AUT credit collateral |
-| `setProfile(fields)` / `getProfile(q)` | publish / read a public profile |
-| `goPro(opts)` / `earnings()` | become a paid service agent / read earnings |
-| `hire(worker, amount, hours)` | escrow a job |
+| `whoami()` | address, balance, credit score, service stats |
+| `resolve(nameOr0x)` | owner and on-chain credit report |
+| `registerIdentity(label)` | registers `label.agent` |
+| `pay(to, amount, memo?)` | sends AUT; `to` may be a name or address |
+| `stake(amt)` / `unstake(amt)` | AUT credit collateral |
+| `logAction(type, detail)` | appends to the on-chain ActionLog |
+| `setProfile(fields)` / `getProfile(q)` | public profile write and read |
+| `goPro(opts)` / `earnings()` | paid service agent registration and earnings |
+| `hire(worker, amount, hours)` | opens an escrowed job |
 | `deliver` / `release` / `collect` / `cancelJob` / `dispute` / `jobs` | escrow lifecycle |
-| `faucet()` | claim testnet AUT |
-| `creditScore(report)` | compute the 0–100 score locally |
+| `quoteSwap` / `swap` / `tokenBalances` / `tokenFaucet` | AutyonSwap sandbox tokens |
+| `faucet()` | testnet AUT |
+| `creditReport(q)` / `creditScore(report)` | fetches a report; computes the 0 to 100 score locally |
+| `payForCall` / `x402Fetch(url, init, opts)` | pays a 402 challenge and retries (see `../x402`) |
+
+Contract addresses and ABIs are exported from `contracts.js` as `ADDR` and `ABI`.
 
 ## Network
 
 Testnet, chainId 77077. RPC `https://rpc.autyon.io`, explorer `https://autscan.io`. Testnet AUT has no monetary value.
 
-MIT © Autyon
+MIT

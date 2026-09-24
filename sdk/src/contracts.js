@@ -1,5 +1,4 @@
-// contracts.js — Autyon Testnet deployed addresses + minimal ABIs.
-// chainId 77077. All source-verified on https://autscan.io.
+
 
 export const CHAIN_ID = 77077;
 export const DEFAULT_RPC = "https://rpc.autyon.io";
@@ -7,13 +6,13 @@ export const DEFAULT_API = "https://api.autyon.io";
 export const SCAN = "https://autscan.io";
 
 export const ADDR = {
-  registrar: "0x7F3636d9bBDc86320F14Ae7A852d9A9d1D57564c", // AgentNameNFT (.agent registrar)
-  resolver:  "0xa9d5e19b1fcafb6f0b1810e026cc429a631ceb84", // AgentResolverV2
-  actionLog: "0x106923dDF70A1AE237E7A4f7BBbE870CB3521436", // AgentActionLog
-  faucet:    "0x8Eb08E93f61f8f835c1cf4C94fD74c14EF06C72B", // AutyonFaucet
-  registry:  "0x0ed6dafe3de759a46e7b6f1d7290f491dfae820a", // AgentRegistry (service agents)
-  service:   "0x3218003233f418bb83829c9627494b49ef0edf96", // ServicePayment
-  escrow:    "0x1DB932d3Af53F42b806Bb984180DBE5Bf6682811", // TaskEscrow (hiring)
+  registrar: "0x7F3636d9bBDc86320F14Ae7A852d9A9d1D57564c",
+  resolver:  "0xa9d5e19b1fcafb6f0b1810e026cc429a631ceb84",
+  actionLog: "0x106923dDF70A1AE237E7A4f7BBbE870CB3521436",
+  faucet:    "0x8Eb08E93f61f8f835c1cf4C94fD74c14EF06C72B",
+  registry:  "0x0ed6dafe3de759a46e7b6f1d7290f491dfae820a",
+  service:   "0x3218003233f418bb83829c9627494b49ef0edf96",
+  escrow:    "0x1DB932d3Af53F42b806Bb984180DBE5Bf6682811",
 };
 
 export const ABI = {
@@ -77,15 +76,12 @@ export const ABI = {
 export const JOB_STATUS = ["none", "funded", "delivered", "released", "refunded", "disputed", "resolved"];
 export const PROFILE_KEYS = ["description", "avatar", "url", "endpoint", "skills"];
 
-// ---- AutyonSwap (DeFi sandbox) ----
-
 export const DEX = {
   factory: "0x7979F01209f359eCc6EF8Eb017C3907Fd596b6aD",
-  router: "0x472f81E0b15d1D4a994A607C30857e8b6666137c", // AutyonSwapRouterV2
+  router: "0x472f81E0b15d1D4a994A607C30857e8b6666137c",
   waut: "0x2395B0E0875FefFa196346164dBb4E7eb6960Ff1",
 };
 
-/** Tradable tokens. AUT is the native coin; the router wraps it transparently. */
 export const DEX_TOKENS = {
   AUT: { address: DEX.waut, decimals: 18, native: true },
   USDT: { address: "0xa4Bf9DC9a5409ee16c31eC98eFc65E8ED7A09e47", decimals: 6 },
@@ -94,7 +90,6 @@ export const DEX_TOKENS = {
   BTC: { address: "0xA61F9371a9076232E3b117b3eaF68d28aB1Beb84", decimals: 8 },
 };
 
-/** Direct pools; anything else routes through USDT. */
 export const DEX_DIRECT_PAIRS = [["ETH", "USDT"], ["BTC", "USDT"], ["USDC", "USDT"], ["AUT", "USDT"]];
 
 export const DEX_ROUTER_ABI = [

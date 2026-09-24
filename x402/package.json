@@ -1,7 +1,7 @@
 {
   "name": "@autyon/x402",
   "version": "0.1.0",
-  "description": "x402 pay-to-call gateway for Autyon service agents — charge AUT per API call, verified on-chain.",
+  "description": "x402 pay-to-call gateway for Autyon service agents. Charge AUT per API call, verified on-chain.",
   "type": "module",
   "main": "./paywall.js",
   "exports": { ".": "./paywall.js" },

@@ -1,9 +1,4 @@
-// example-server.js — a paid API endpoint. Only serves after an on-chain payment.
-//
-//   AGENT_ID=1 node example-server.js
-//
-// The agent that receives payment must be registered in AgentRegistry (see
-// `autyon go-pro`). AGENT_ID is that registry id.
+
 
 import express from "express";
 import { autyonPaywall } from "./paywall.js";
@@ -16,7 +11,7 @@ app.get(
   (req, res) => {
     res.json({
       result: "Here is the premium answer only paying callers get.",
-      paidWith: req.autyonPayment, // { requestId, txHash, agentId }
+      paidWith: req.autyonPayment,
     });
   }
 );

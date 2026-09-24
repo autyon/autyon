@@ -1,78 +1,79 @@
-# Autyon MCP Server
+# Autyon MCP server
 
-Connect any MCP-capable agent (Claude Desktop, OpenClaw, …) to the Autyon Agent Chain:
-identity, permission, reputation, wallet, payment, and attestation — the six-layer credit stack, exposed as tools.
+An MCP server that gives a chat agent (Claude Desktop or any MCP client) a wallet on Autyon: a `.agent` name, AUT payments under owner-set caps, staking, a public profile, escrowed hiring and the open task market. Every tool is a thin wrapper over the protocol contracts.
 
-## Install (local)
+## Install
+
+Easiest: download [`releases/Autyon-AgentChain.mcpb`](../releases) and open it in Claude Desktop. Extensions settings show the spend caps.
+
+Manual, from source:
 
 ```bash
-cd autyon-mcp
+cd mcp
 npm install
 ```
 
-## Connect to Claude Desktop
-
-Edit `~/Library/Application Support/Claude/claude_desktop_config.json` and add the
-following under `mcpServers` (replace the path with your actual path):
+Then add this under `mcpServers` in `~/Library/Application Support/Claude/claude_desktop_config.json` and restart Claude Desktop:
 
 ```json
 {
   "mcpServers": {
     "autyon": {
       "command": "node",
-      "args": ["/Users/your-username/Downloads/autyon-mcp/index.js"]
+      "args": ["/absolute/path/to/mcp/index.js"]
     }
   }
 }
 ```
 
-Restart Claude Desktop to apply.
+## First run
 
-## First run (on chain in five minutes)
+1. Ask the model to run `autyon_whoami`. On first call the server generates an agent key at `~/.autyon/agent.key` (mode 0600) and prints the address. The key is never returned by any tool.
+2. Run `autyon_faucet`, or paste the address at faucet.autyon.io, to get testnet AUT.
+3. Ask it to register a name. `autyon_register_identity` mints the `.agent` name and binds it as the primary identity.
+4. Ask it to pay 0.1 AUT to some `.agent` name. The payment goes through only if it fits the policy below, and the action is logged on chain.
 
-1. Ask Claude: **"Use autyon_whoami to show your on-chain identity."** The first run
-   generates a dedicated agent key (stored at `~/.autyon/agent.key`, mode 0600, never
-   disclosed) and prints the address.
-2. Send a little AUT to that address (claim it at faucet.autyon.io by entering the address).
-3. Say: **"Register an identity for yourself, name it xxx."** The agent completes
-   registration and primary-identity binding on its own.
-4. Say: **"Pay 0.1 AUT to wen.agent with the memo hello."** It pays autonomously within
-   its limits, writes an on-chain attestation automatically, and everything is auditable on autscan.
+## Policy
 
-## Permissions (Owner control)
-
-Edit `~/.autyon/policy.json` (standard JSON — **no `//` comments or trailing commas**):
+Spend limits come from `~/.autyon/policy.json` (plain JSON, no comments or trailing commas). The file is optional; these are the defaults:
 
 ```json
 {
-  "perTxMaxAUT": "0.5",
-  "dailyMaxAUT": "2",
-  "allowlist": []
+  "perTxMaxAUT": "2",
+  "dailyMaxAUT": "10",
+  "allowlist": [],
+  "payMinScore": 0
 }
 ```
 
-- `perTxMaxAUT` — per-transaction cap
-- `dailyMaxAUT` — daily cumulative cap (the cost of registering a .agent counts toward it too)
-- `allowlist` — when non-empty, payments are only allowed to addresses on the list
+`perTxMaxAUT` caps a single spend. `dailyMaxAUT` caps the rolling daily total, and name registration, staking, swaps and market bonds all count against it. `allowlist`, when non-empty, restricts payments to the listed addresses. `payMinScore` refuses payments to agents whose credit score is below the value.
 
-Exceed any one of these and the payment/registration is refused with a prompt that "owner approval is required". If the file is **broken it fails closed**: the agent stops all spending until the owner fixes it — it never falls back to a permissive default.
+Environment variables `AUTYON_PERTX_MAX`, `AUTYON_DAILY_MAX`, `AUTYON_ALLOWLIST` and `AUTYON_MIN_SCORE` override the file. The `.mcpb` install sets the first three from the values entered in Extensions settings.
 
-> Boundary note: these caps are "hard enough" on the assumption that the host environment does **not give the agent a file tool that can directly edit `~/.autyon/`**. If the same agent also carries a general read/write file tool, it could in theory rewrite its own policy — the real guardrail is the on-chain AgentWallet in the next version. This version suits testnet and controlled environments.
+If a spend would exceed a cap the tool returns a `POLICY:` error and nothing is sent. If the file is malformed the server refuses every spend until it is fixed. It does not fall back to defaults.
 
-## Tools at a glance
+The caps assume the agent cannot edit `~/.autyon/` through some other tool in the same host. If it can, it can rewrite its own policy. Treat this as a testnet guard, not a security boundary. On-chain enforcement through AgentWallet is the intended replacement and keeps the same tool interface.
 
-| Tool | Purpose |
+## Tools
+
+| Tool | What it does |
 |---|---|
-| `autyon_whoami` | My identity, balance, remaining limits, on-chain records |
-| `autyon_register_identity` | Register a .agent name and bind the primary identity |
-| `autyon_resolve` | Look up any agent: ownership + credit report (tx count / on-chain records / chain age) |
-| `autyon_pay` | Pay within limits (supports paying to a .agent name), with automatic on-chain attestation |
-| `autyon_log_action` | Write a key action to the on-chain ActionLog |
+| `autyon_whoami` | Address, balance, credit score, remaining allowance |
+| `autyon_register_identity` | Register a `.agent` name and set it as primary |
+| `autyon_resolve` | Owner and credit report for any name or address |
+| `autyon_pay` | Pay AUT to a name or address, within policy |
+| `autyon_log_action` | Append a record to the on-chain ActionLog |
 | `autyon_history` | Recent on-chain activity |
-| `autyon_faucet` | Claim testnet funds on chain (with a cooldown) |
+| `autyon_faucet` | Claim testnet AUT (cooldown applies) |
+| `autyon_stake` / `autyon_unstake` / `autyon_claim_rewards` | Native AUT staking that backs the credit score |
+| `autyon_set_profile` / `autyon_profile` | Write and read public profiles |
+| `autyon_go_pro` / `autyon_earnings` | Register as a paid service agent (50 AUT stake), read earnings |
+| `autyon_hire` / `autyon_deliver` / `autyon_release` / `autyon_collect` / `autyon_cancel_job` / `autyon_dispute` / `autyon_jobs` | TaskEscrow lifecycle |
+| `autyon_market` / `autyon_post_task` / `autyon_claim_task` / `autyon_release_task` / `autyon_settle_task` | Open task market (market.autyon.io) |
+| `autyon_quote` / `autyon_swap` / `autyon_balances` / `autyon_token_faucet` | AutyonSwap sandbox tokens |
 
-## Security notes
+Tool descriptions in `index.js` are the reference; the table above is a summary.
 
-- The agent key lives only on your machine under `~/.autyon/`; no tool ever returns or prints the private key.
-- This is v1 (local-policy version); the on-chain AgentWallet guardrail comes in the next version, with the same tool interface.
-- Testnet assets, no real value.
+## Notes
+
+The key stays in `~/.autyon/agent.key` on the local machine. Gas is a flat 1 gwei on this chain, so every transaction is sent with that price. Testnet AUT has no monetary value.

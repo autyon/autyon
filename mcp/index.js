@@ -1,26 +1,4 @@
 #!/usr/bin/env node
-// Autyon AgentChain MCP server.
-//
-// Gives any MCP-compatible agent (Claude, OpenClaw, ...) an on-chain existence:
-// identity (.agent name), a policy-limited wallet, payments, and tamper-proof
-// action records — the six-layer credit stack, as tools.
-//
-// SECURITY MODEL
-// - On first run a dedicated agent key is generated at ~/.autyon/agent.key
-//   (0600). It is never printed, never returned by any tool, and never leaves
-//   this machine.
-// - The OWNER controls policy in ~/.autyon/policy.json (per-tx cap, daily cap,
-//   optional allowlist). The agent cannot edit its own policy through any tool.
-//   NOTE: these caps hold only as far as the host denies the agent write access
-//   to ~/.autyon/. If the same agent also has generic filesystem tools, treat
-//   the on-chain AgentWallet guardrails (next version) as the real boundary.
-// - Policy parsing is FAIL-CLOSED: a malformed policy.json stops all spending
-//   until the owner fixes it, rather than silently reverting to loose defaults.
-// - Every value-moving tool is serialized through a single in-process lock, so
-//   concurrent tool calls cannot race the daily-cap ledger or collide on nonce.
-//
-// This is the local-policy v1. On-chain AgentWallet guardrails are the next
-// step; the tool surface stays the same.
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -33,21 +11,20 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 
-/* ---------------- config ---------------- */
 const RPC = process.env.AUTYON_RPC || "https://rpc.autyon.io";
 const API = process.env.AUTYON_API || "https://api.autyon.io";
 const SCAN = "https://autscan.io";
 const CHAIN_ID = 77077;
 
-const REGISTRAR = "0x7F3636d9bBDc86320F14Ae7A852d9A9d1D57564c"; // AgentNameNFT
-const RESOLVER  = "0xa9d5e19b1fcafb6f0b1810e026cc429a631ceb84"; // AgentResolverV2
+const REGISTRAR = "0x7F3636d9bBDc86320F14Ae7A852d9A9d1D57564c";
+const RESOLVER = "0xa9d5e19b1fcafb6f0b1810e026cc429a631ceb84";
 const ACTION_LOG = "0x106923dDF70A1AE237E7A4f7BBbE870CB3521436";
 const FAUCET = "0x8Eb08E93f61f8f835c1cf4C94fD74c14EF06C72B";
-const REGISTRY = "0x0ed6dafe3de759a46e7b6f1d7290f491dfae820a"; // AgentRegistry (service agents)
-const SERVICE  = "0x3218003233f418bb83829c9627494b49ef0edf96"; // ServicePayment
-const ESCROW   = "0x1DB932d3Af53F42b806Bb984180DBE5Bf6682811"; // TaskEscrow (hire jobs)
-const BOARD    = "0xf3718296d3fF376C6426514C3b72923607A4D269"; // OpenJobBoard (public task market)
-const STAKING  = "0x5700633eAc00C429B8bf1893a87d913Dbb202945"; // AutyonStakingNative (credit-score stake)
+const REGISTRY = "0x0ed6dafe3de759a46e7b6f1d7290f491dfae820a";
+const SERVICE = "0x3218003233f418bb83829c9627494b49ef0edf96";
+const ESCROW = "0x1DB932d3Af53F42b806Bb984180DBE5Bf6682811";
+const BOARD = "0xf3718296d3fF376C6426514C3b72923607A4D269";
+const STAKING = "0x5700633eAc00C429B8bf1893a87d913Dbb202945";
 
 const REGISTRAR_ABI = [
   "function register(string label, address agentWallet) payable returns (bytes32)",
@@ -94,7 +71,6 @@ const SERVICE_ABI = [
   "function payerLockedStake(address) view returns (uint256)",
   "function lockedUntil(address) view returns (uint256)",
 ];
-// Profile text-record keys (ENS-style convention; the resolver stores any key).
 const PROFILE_KEYS = ["description", "avatar", "url", "endpoint", "skills"];
 const ESCROW_ABI = [
   "function createJob(address worker, uint64 duration) payable returns (uint256)",
@@ -135,7 +111,6 @@ const STAKING_ABI = [
   "function MIN_STAKE() view returns (uint256)",
 ];
 
-/* ---------------- key + policy (owner-controlled files) ---------------- */
 const DIR = path.join(os.homedir(), ".autyon");
 const KEY_FILE = path.join(DIR, "agent.key");
 const POLICY_FILE = path.join(DIR, "policy.json");
@@ -147,19 +122,13 @@ function ensureKey() {
     const w = Wallet.createRandom();
     fs.writeFileSync(KEY_FILE, w.privateKey, { mode: 0o600 });
   } else {
-    // Re-assert restrictive perms on a pre-existing key file.
     try { fs.chmodSync(KEY_FILE, 0o600); } catch {}
   }
   return new Wallet(fs.readFileSync(KEY_FILE, "utf8").trim());
 }
 
-// Defaults are sized so a first .agent registration (1 AUT) works out of the box
-// while ongoing autonomous payments stay bounded. The owner can raise/lower these
-// in the extension's Settings UI (injected as env vars below) or in policy.json.
 const DEFAULT_POLICY = { perTxMaxAUT: "2", dailyMaxAUT: "10", allowlist: [], payMinScore: 0 };
 
-// FAIL-CLOSED: throws (halting the action) if policy.json exists but is invalid,
-// rather than falling back to the looser defaults.
 function policy() {
   if (!fs.existsSync(POLICY_FILE)) {
     fs.writeFileSync(POLICY_FILE, JSON.stringify(DEFAULT_POLICY, null, 2), { mode: 0o600 });
@@ -170,22 +139,19 @@ function policy() {
     raw = JSON.parse(fs.readFileSync(POLICY_FILE, "utf8"));
   } catch (e) {
     throw new Error(
-      `POLICY: ~/.autyon/policy.json is not valid JSON — refusing to act until the owner fixes it (${e.message}). ` +
+      `POLICY: ~/.autyon/policy.json is not valid JSON, refusing to act until the owner fixes it (${e.message}). ` +
       `Note: JSON does not allow // comments or trailing commas.`
     );
   }
   const p = { ...DEFAULT_POLICY, ...raw };
-  // Extension Settings UI overrides (owner-controlled, injected as env vars by the
-  // Desktop Extension; the agent/LLM cannot set process env, so these stay owner-only).
   if (process.env.AUTYON_PERTX_MAX) p.perTxMaxAUT = process.env.AUTYON_PERTX_MAX;
   if (process.env.AUTYON_DAILY_MAX) p.dailyMaxAUT = process.env.AUTYON_DAILY_MAX;
   if (process.env.AUTYON_ALLOWLIST != null && process.env.AUTYON_ALLOWLIST !== "")
     p.allowlist = process.env.AUTYON_ALLOWLIST.split(",").map((s) => s.trim()).filter(Boolean);
   if (process.env.AUTYON_MIN_SCORE) p.payMinScore = process.env.AUTYON_MIN_SCORE;
-  // Validate shape; any failure is fail-closed.
   const ms = Number(p.payMinScore);
   if (!Number.isFinite(ms) || ms < 0 || ms > 100)
-    throw new Error(`POLICY: payMinScore ("${p.payMinScore}") must be a number 0–100.`);
+    throw new Error(`POLICY: payMinScore ("${p.payMinScore}") must be a number from 0 to 100.`);
   p.payMinScore = ms;
   try { parseEther(String(p.perTxMaxAUT)); }
   catch { throw new Error(`POLICY: perTxMaxAUT ("${p.perTxMaxAUT}") is not a valid AUT amount.`); }
@@ -204,7 +170,6 @@ function spendToday() {
   } catch {}
   return { date: today, spentWei: "0" };
 }
-// delta may be negative (to refund a reservation); never drops below zero.
 function recordSpend(deltaWei) {
   const s = spendToday();
   let next = BigInt(s.spentWei) + deltaWei;
@@ -213,10 +178,6 @@ function recordSpend(deltaWei) {
   fs.writeFileSync(SPEND_FILE, JSON.stringify(s), { mode: 0o600 });
 }
 
-/* ---------------- serialization lock ----------------
- * Every tool that sends a transaction runs through this queue, so two
- * concurrent tool calls can never both pass the daily-cap check before either
- * writes, and never collide on the signer's nonce. */
 let _chain = Promise.resolve();
 function withLock(fn) {
   const run = _chain.then(fn, fn);
@@ -226,14 +187,11 @@ function withLock(fn) {
 
 const provider = new JsonRpcProvider(RPC, CHAIN_ID, { staticNetwork: true });
 const signer = ensureKey().connect(provider);
-const GAS = { gasPrice: 1_000_000_000n }; // flat 1 gwei, zeroBaseFee chain — deterministic
+const GAS = { gasPrice: 1_000_000_000n };
 const TX_TIMEOUT_MS = 120_000;
 
-// wait with a timeout so a stuck tx cannot hang a tool call forever.
 async function waitTx(tx) { return tx.wait(1, TX_TIMEOUT_MS); }
 
-// fetch with a hard timeout — a stalled explorer must never freeze a tool call
-// (especially the reputation gate, which runs inside the serialized value lock).
 async function fetchT(url, ms = 8000) {
   const ac = new AbortController();
   const t = setTimeout(() => ac.abort(), ms);
@@ -242,35 +200,28 @@ async function fetchT(url, ms = 8000) {
 }
 
 const clean = (n) => String(n || "").trim().toLowerCase().replace(/\.agent$/, "");
-const short = (a) => `${a.slice(0, 6)}…${a.slice(-4)}`;
-// Reject "0x…"-looking inputs that aren't valid addresses, instead of misreading
-// them as .agent names.
+const short = (a) => `${a.slice(0, 6)}...${a.slice(-4)}`;
 function badHexGuard(s) {
   const t = String(s || "").trim();
   if (/^0x/i.test(t) && !isAddress(t))
-    throw new Error(`"${t}" looks like an address but is malformed — an address is 0x followed by 40 hex characters.`);
+    throw new Error(`"${t}" looks like an address but is malformed. An address is 0x followed by 40 hex characters.`);
 }
-// Mirror the on-chain _validLabel rules so we fail fast instead of burning gas.
 function validLabel(l) {
   return (
     typeof l === "string" &&
     l.length >= 3 && l.length <= 63 &&
     /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(l) &&
     !l.includes("--") &&
-    !/^0x/i.test(l)          // avoid names that look like (malformed) addresses
+    !/^0x/i.test(l)
   );
 }
 
-// Resolve a ".agent" name or 0x address to an address, cross-checking the API
-// answer against the on-chain resolver. Used for PAYMENTS, where a wrong
-// address means lost funds — so a mismatch refuses rather than guesses.
 async function resolveToChecked(target) {
   if (isAddress(target)) return { address: target, name: null };
   badHexGuard(target);
   const label = clean(target);
   if (!validLabel(label)) throw new Error(`"${target}" is not a valid .agent name.`);
 
-  // On-chain (authoritative): node -> resolver.addr -> resolver.wallet -> NFT owner.
   const reg = new Contract(REGISTRAR, REGISTRAR_ABI, provider);
   const resolver = new Contract(RESOLVER, RESOLVER_ABI, provider);
   const node = await reg.nodeOf(label);
@@ -281,9 +232,8 @@ async function resolveToChecked(target) {
     try { chainAddr = await reg.ownerOf(await reg.tokenIdOf(label)); } catch {}
   }
   if (!isAddress(chainAddr) || chainAddr === ZeroAddress)
-    throw new Error(`"${label}.agent" is not registered on-chain — refusing to pay.`);
+    throw new Error(`"${label}.agent" is not registered on-chain, refusing to pay.`);
 
-  // API (advisory): cross-check. Disagreement => refuse.
   try {
     const r = await fetchT(`${API}/api/names/${encodeURIComponent(label)}`);
     if (r.ok) {
@@ -297,18 +247,15 @@ async function resolveToChecked(target) {
     }
   } catch (e) {
     if (String(e.message).startsWith("SAFETY:")) throw e;
-    // API unreachable is fine — the on-chain value is authoritative.
   }
   return { address: chainAddr, name: `${label}.agent` };
 }
 
 async function creditReport(address) {
   const out = { address };
-  // Outgoing tx count from the node nonce — instant and never lags the indexer.
   let nonce = 0;
   try { nonce = Number(await provider.getTransactionCount(address)); } catch {}
   out.transactions = nonce;
-  // The explorer counter includes incoming txs too; take the larger of the two.
   try {
     const r = await fetchT(`${SCAN}/api/v2/addresses/${address}/counters`);
     if (r.ok) out.transactions = Math.max(nonce, Number((await r.json()).transactions_count ?? 0));
@@ -328,7 +275,6 @@ async function creditReport(address) {
     const p = await reg.primaryName(address);
     if (p) out.primary_name = `${clean(p)}.agent`;
   } catch {}
-  // AUT staked for credit backing (AutyonStakingNative — what the credit score reads)
   try {
     const stk = new Contract(STAKING, STAKING_ABI, provider);
     out.staked_aut = formatEther(await stk.staked(address));
@@ -337,14 +283,13 @@ async function creditReport(address) {
     const rew = await stk.earned(address);
     if (rew > 0n) out.staking_rewards_aut = formatEther(rew);
   } catch {}
-  // If this address owns a registered service agent, pull its on-chain stats.
   try {
     const reg = new Contract(REGISTRY, REGISTRY_ABI, provider);
-    const id = await reg.ownerAgents(address, 0); // first service agent, if any
+    const id = await reg.ownerAgents(address, 0);
     if (id > 0n) {
       const a = await reg.getAgent(id);
       out.service_agent_id = id.toString();
-      out.service_active = Number(a.status) === 1; // 1 = Active
+      out.service_active = Number(a.status) === 1;
       out.service_reputation = a.reputation.toString();
       out.service_calls = a.totalCalls.toString();
       out.service_earned = formatEther(a.totalEarned);
@@ -354,25 +299,21 @@ async function creditReport(address) {
   return out;
 }
 
-// A deterministic 0–100 Agent Credit Score from on-chain signals. Transparent by
-// design: identity + skin-in-the-game + track record, nothing hidden or gameable
-// beyond actually being active on chain.
 function creditScore(rep) {
   let s = 0;
-  if (rep.primary_name) s += 20;                                   // has an identity
+  if (rep.primary_name) s += 20;
   const staked = Number(rep.staked_aut || 0) + Number(rep.service_stake || 0);
-  s += Math.min(staked / 50, 1) * 25;                              // skin in the game (cap at 50 AUT)
-  s += Math.min(Number(rep.service_calls || 0) / 50, 1) * 20;      // real service track record
-  s += Math.min(Number(rep.logged_actions || 0) / 25, 1) * 15;    // attested work
-  s += Math.min(Number(rep.transactions || 0) / 100, 1) * 10;     // on-chain activity
-  s += Math.min(Number(rep.agent_age_days || 0) / 90, 1) * 10;    // longevity
+  s += Math.min(staked / 50, 1) * 25;
+  s += Math.min(Number(rep.service_calls || 0) / 50, 1) * 20;
+  s += Math.min(Number(rep.logged_actions || 0) / 25, 1) * 15;
+  s += Math.min(Number(rep.transactions || 0) / 100, 1) * 10;
+  s += Math.min(Number(rep.agent_age_days || 0) / 90, 1) * 10;
   return Math.round(s);
 }
 function scoreBand(s) {
   return s >= 75 ? "excellent" : s >= 50 ? "good" : s >= 25 ? "building" : "new";
 }
 
-/* ---------------- server + tools ---------------- */
 const server = new McpServer({ name: "autyon", version: "0.7.0" });
 
 server.tool(
@@ -388,7 +329,7 @@ server.tool(
     const score = creditScore(rep);
     const lines = [
       `Address: ${addr}`,
-      `Name: ${rep.primary_name || "(none — use autyon_register_identity)"}`,
+      `Name: ${rep.primary_name || "(none, use autyon_register_identity)"}`,
       `Balance: ${formatEther(bal)} AUT · Staked: ${rep.staked_aut ?? "0"} AUT`,
       `Agent Credit Score: ${score}/100 (${scoreBand(score)})`,
       `Policy: per-tx ≤ ${pol.perTxMaxAUT} AUT · daily ≤ ${pol.dailyMaxAUT} AUT · spent today ${formatEther(spent)} AUT · remaining ${formatEther(daily > spent ? daily - spent : 0n)} AUT${pol.payMinScore ? ` · will only pay agents scoring ≥ ${pol.payMinScore}` : ""}`,
@@ -403,7 +344,7 @@ server.tool(
 
 server.tool(
   "autyon_register_identity",
-  "Register a .agent name as this agent's on-chain identity and bind it as the primary name. Costs the on-chain registration price, paid from the agent's balance — this spend counts against the owner's per-tx and daily caps.",
+  "Register a .agent name as this agent's on-chain identity and bind it as the primary name. Costs the on-chain registration price, paid from the agent's balance. This spend counts against the owner's per-tx and daily caps.",
   { label: z.string().describe("the name to register, without .agent (3-63 chars, lowercase letters, digits, hyphens; no leading/trailing or double hyphen)") },
   async ({ label }) => withLock(async () => {
     const l = clean(label);
@@ -413,7 +354,6 @@ server.tool(
 
     const price = await reg.price();
     const pol = policy();
-    // H1: registration spend is gated by the same caps as payments.
     if (price > parseEther(String(pol.perTxMaxAUT)))
       throw new Error(`POLICY: registration costs ${formatEther(price)} AUT, above the per-tx cap of ${pol.perTxMaxAUT} AUT. The owner must raise the cap in ~/.autyon/policy.json.`);
     const spent = BigInt(spendToday().spentWei);
@@ -424,17 +364,15 @@ server.tool(
     if (bal < price + parseEther("0.01"))
       throw new Error(`registration costs ${formatEther(price)} AUT + gas; balance is ${formatEther(bal)} AUT. Fund ${signer.address} first.`);
 
-    recordSpend(price); // reserve before broadcasting
+    recordSpend(price);
     let tx1;
     try {
       tx1 = await reg.register(l, signer.address, { value: price, ...GAS });
       await waitTx(tx1);
     } catch (e) {
-      recordSpend(-price); // refund the reservation on failure
+      recordSpend(-price);
       throw e;
     }
-    // register() already binds the primary name when the agent had none, so the
-    // separate setPrimaryName is only needed if a different primary was set before.
     let tx2 = null;
     try {
       const current = clean(await reg.primaryName(signer.address));
@@ -471,12 +409,12 @@ server.tool(
       owner ? `Owner: ${owner}` : null,
       `Address: ${address}`,
       rep.primary_name && rep.primary_name !== name ? `Primary name: ${rep.primary_name}` : null,
-      `— Agent Credit Report —`,
+      `Agent Credit Report`,
       `Agent Credit Score: ${score}/100 (${scoreBand(score)})`,
       `Staked: ${rep.staked_aut ?? "0"} AUT`,
       rep.service_agent_id ? `Service agent #${rep.service_agent_id} · ${rep.service_calls} calls · earned ${rep.service_earned} AUT · reputation ${rep.service_reputation}` : null,
       `Transactions: ${rep.transactions ?? "?"}`,
-      `Logged actions: ${rep.logged_actions ?? "?"} (open log — anyone can append; weigh accordingly)`,
+      `Logged actions: ${rep.logged_actions ?? "?"} (open log, anyone can append, weigh accordingly)`,
       `Agent age: ${rep.agent_age_days ? rep.agent_age_days + " days" : "new"}`,
       `Explorer: ${SCAN}/address/${address}`,
     ].filter(Boolean);
@@ -508,7 +446,6 @@ server.tool(
     if (pol.allowlist?.length && !pol.allowlist.map(a => String(a).toLowerCase()).includes(dest.address.toLowerCase()))
       throw new Error(`POLICY: ${dest.name || dest.address} is not on the owner's allowlist.`);
 
-    // Reputation gate: refuse to pay agents below the owner's minimum credit score.
     if (pol.payMinScore > 0) {
       const rrep = await creditReport(dest.address);
       const rscore = creditScore(rrep);
@@ -516,16 +453,15 @@ server.tool(
         throw new Error(`POLICY: ${dest.name || dest.address} has an Agent Credit Score of ${rscore}/100, below the owner's minimum of ${pol.payMinScore}. Refusing to pay a low-reputation counterpart.`);
     }
 
-    recordSpend(wei); // reserve before broadcasting
+    recordSpend(wei);
     let tx;
     try {
       tx = await signer.sendTransaction({ to: dest.address, value: wei, ...GAS, gasLimit: 21000n });
       await waitTx(tx);
     } catch (e) {
-      recordSpend(-wei); // refund reservation on failure
+      recordSpend(-wei);
       throw e;
     }
-    // tamper-proof record (best-effort; does not undo a completed payment)
     let logTx = null;
     try {
       const log = new Contract(ACTION_LOG, ACTION_LOG_ABI, signer);
@@ -584,20 +520,18 @@ server.tool(
     if (bal === 0n)
       throw new Error(`no gas to claim. Ask the owner to send a tiny amount of AUT to ${signer.address} first (or use faucet.autyon.io with this address).`);
     const faucet = new Contract(FAUCET, FAUCET_ABI, signer);
-    // Friendly pre-check so cooldown reads as a clear message, not a raw revert.
     try {
       const wait = await faucet.timeUntilNextClaim(signer.address);
-      if (wait > 0n) return { content: [{ type: "text", text: `Faucet is on cooldown — try again in ${humanDuration(wait)}.` }] };
+      if (wait > 0n) return { content: [{ type: "text", text: `Faucet is on cooldown, try again in ${humanDuration(wait)}.` }] };
     } catch {}
     let tx;
     try {
       tx = await faucet.claim(GAS);
       await waitTx(tx);
     } catch (e) {
-      // Decode the on-chain cooldown error if the pre-check raced.
       const rem = e?.revert?.args?.[0] ?? e?.data;
       if (e?.revert?.name === "CooldownActive")
-        return { content: [{ type: "text", text: `Faucet is on cooldown — try again in ${humanDuration(rem)}.` }] };
+        return { content: [{ type: "text", text: `Faucet is on cooldown, try again in ${humanDuration(rem)}.` }] };
       throw e;
     }
     const after = await provider.getBalance(signer.address);
@@ -634,7 +568,7 @@ server.tool(
       await waitTx(tx);
     } catch (e) { recordSpend(-wei); throw e; }
     const staked = formatEther(await stkR.staked(signer.address));
-    return { content: [{ type: "text", text: `Staked ${amount} AUT. Total staked: ${staked} AUT — this backs your credit score and accrues rewards (autyon_claim_rewards).\nTx: ${SCAN}/tx/${tx.hash}` }] };
+    return { content: [{ type: "text", text: `Staked ${amount} AUT. Total staked: ${staked} AUT. This backs your credit score and accrues rewards (autyon_claim_rewards).\nTx: ${SCAN}/tx/${tx.hash}` }] };
   })
 );
 
@@ -650,7 +584,7 @@ server.tool(
     if (!amount) {
       if (pend.amount === 0n) throw new Error(`nothing is cooling down. Call with an amount first to start the cooldown.`);
       if (Number(pend.unlockAt) > now)
-        return { content: [{ type: "text", text: `${formatEther(pend.amount)} AUT is still cooling down — withdrawable in ${humanDuration(Number(pend.unlockAt) - now)}.` }] };
+        return { content: [{ type: "text", text: `${formatEther(pend.amount)} AUT is still cooling down, withdrawable in ${humanDuration(Number(pend.unlockAt) - now)}.` }] };
       const tx = await stk.withdraw(GAS);
       await waitTx(tx);
       return { content: [{ type: "text", text: `Withdrew ${formatEther(pend.amount)} AUT back to this agent's balance.\nTx: ${SCAN}/tx/${tx.hash}` }] };
@@ -659,11 +593,11 @@ server.tool(
     try { wei = parseEther(amount); } catch { throw new Error(`"${amount}" is not a valid AUT amount.`); }
     if (wei <= 0n) throw new Error(`amount must be greater than zero.`);
     if (pend.amount > 0n && Number(pend.unlockAt) > now)
-      return { content: [{ type: "text", text: `A cooldown of ${formatEther(pend.amount)} AUT is already running (ready in ${humanDuration(Number(pend.unlockAt) - now)}). Re-requesting would restart the clock — wait and withdraw first.` }] };
+      return { content: [{ type: "text", text: `A cooldown of ${formatEther(pend.amount)} AUT is already running (ready in ${humanDuration(Number(pend.unlockAt) - now)}). Re-requesting would restart the clock. Wait and withdraw first.` }] };
     const tx = await stk.requestUnstake(wei, GAS);
     await waitTx(tx);
     const p2 = await stkR.pendingUnstake(signer.address);
-    return { content: [{ type: "text", text: `Cooldown started for ${amount} AUT — withdrawable in ${humanDuration(Number(p2.unlockAt) - now)} (call autyon_unstake again with no amount).\nTx: ${SCAN}/tx/${tx.hash}` }] };
+    return { content: [{ type: "text", text: `Cooldown started for ${amount} AUT, withdrawable in ${humanDuration(Number(p2.unlockAt) - now)} (call autyon_unstake again with no amount).\nTx: ${SCAN}/tx/${tx.hash}` }] };
   })
 );
 
@@ -680,12 +614,12 @@ server.tool(
   async (fields) => withLock(async () => {
     const reg = new Contract(REGISTRAR, REGISTRAR_ABI, provider);
     const primary = clean(await reg.primaryName(signer.address));
-    if (!primary) throw new Error(`register a .agent name first (autyon_register_identity) — a profile attaches to your name.`);
+    if (!primary) throw new Error(`register a .agent name first (autyon_register_identity). A profile attaches to your name.`);
     const keys = [], values = [];
     for (const k of PROFILE_KEYS) {
       if (fields[k] != null && fields[k] !== "") { keys.push(k); values.push(String(fields[k]).slice(0, 400)); }
     }
-    if (!keys.length) throw new Error(`nothing to set — provide at least one of: ${PROFILE_KEYS.join(", ")}.`);
+    if (!keys.length) throw new Error(`nothing to set. Provide at least one of: ${PROFILE_KEYS.join(", ")}.`);
     const node = await reg.nodeOf(primary);
     const resolver = new Contract(RESOLVER, RESOLVER_ABI, signer);
     const tx = await resolver.setTexts(node, keys, values, GAS);
@@ -717,7 +651,7 @@ server.tool(
 
 server.tool(
   "autyon_go_pro",
-  "Register this agent as a paid service agent so others can pay to call it (earns AUT, builds on-chain reputation). Requires a 50 AUT stake — this large spend will need the owner to raise the caps in Settings to authorize.",
+  "Register this agent as a paid service agent so others can pay to call it (earns AUT, builds on-chain reputation). Requires a 50 AUT stake. This large spend will need the owner to raise the caps in Settings to authorize.",
   {
     name: z.string().optional().describe("display name / category for the service"),
     description: z.string().optional(),
@@ -725,7 +659,6 @@ server.tool(
   },
   async ({ name, description, endpoint }) => withLock(async () => {
     const reg = new Contract(REGISTRY, REGISTRY_ABI, provider);
-    // already registered?
     try { const id = await reg.ownerAgents(signer.address, 0); if (id > 0n)
       return { content: [{ type: "text", text: `Already a service agent (#${id.toString()}). Use autyon_earnings to see stats.` }] }; } catch {}
     const min = await reg.MIN_STAKE();
@@ -767,8 +700,6 @@ server.tool(
   }
 );
 
-/* ---------------- hire / escrow (Agent hires Agent) ---------------- */
-
 function jobLines(id, j) {
   const st = JOB_STATUS[Number(j.status)] || "?";
   return [
@@ -776,7 +707,7 @@ function jobLines(id, j) {
     `Client: ${short(j.client)} · Worker: ${short(j.worker)}`,
     `Escrow: ${formatEther(j.amount)} AUT`,
     `Deadline: ${new Date(Number(j.deadline) * 1000).toISOString().slice(0, 16)} UTC`,
-    j.delivered ? `Delivered ✓ (hash ${String(j.deliveryHash).slice(0, 10)}…)` : `Not delivered yet`,
+    j.delivered ? `Delivered (hash ${String(j.deliveryHash).slice(0, 10)}...)` : `Not delivered yet`,
   ].join("\n");
 }
 
@@ -786,7 +717,7 @@ server.tool(
   {
     worker: z.string().describe(".agent name or 0x address of the agent to hire"),
     amount: z.string().describe("AUT to escrow, e.g. \"1\""),
-    hours: z.string().optional().describe("deadline in hours (default 24; 0.017–720)"),
+    hours: z.string().optional().describe("deadline in hours (default 24, range 0.017 to 720)"),
   },
   async ({ worker, amount, hours }) => withLock(async () => {
     let wei;
@@ -817,19 +748,18 @@ server.tool(
     }
 
     const esc = new Contract(ESCROW, ESCROW_ABI, signer);
-    let jobId = (await esc.nextJobId()).toString(); // best-effort id; confirmed from the receipt below
+    let jobId = (await esc.nextJobId()).toString();
     recordSpend(wei);
     let tx;
     try {
       tx = await esc.createJob(dest.address, BigInt(dur), { value: wei, ...GAS });
       const rc = await waitTx(tx);
-      // Authoritative jobId from the JobCreated event (robust to external concurrency).
       for (const l of rc.logs) {
         try { const p = esc.interface.parseLog(l); if (p && p.name === "JobCreated") { jobId = p.args.jobId.toString(); break; } } catch {}
       }
     } catch (e) { recordSpend(-wei); throw e; }
     return { content: [{ type: "text", text:
-      `Hired ${dest.name || short(dest.address)} — job #${jobId}, ${amount} AUT escrowed, due in ${h}h.\n` +
+      `Hired ${dest.name || short(dest.address)}: job #${jobId}, ${amount} AUT escrowed, due in ${h}h.\n` +
       `They deliver, then you autyon_release(${jobId}). If they go silent after delivery, they can collect after the deadline.\nTx: ${SCAN}/tx/${tx.hash}` }] };
   })
 );
@@ -928,9 +858,7 @@ server.tool(
   }
 );
 
-/* ---------------- AutyonSwap (DeFi sandbox) ---------------- */
-
-const DEX_ROUTER = "0x472f81E0b15d1D4a994A607C30857e8b6666137c"; // AutyonSwapRouterV2
+const DEX_ROUTER = "0x472f81E0b15d1D4a994A607C30857e8b6666137c";
 const DEX_WAUT = "0x2395B0E0875FefFa196346164dBb4E7eb6960Ff1";
 const DEX_TOKENS = {
   AUT: { address: DEX_WAUT, decimals: 18, native: true },
@@ -955,7 +883,7 @@ const DEX_ERC20_ABI = [
 
 function dexToken(sym) {
   const t = DEX_TOKENS[String(sym || "").toUpperCase()];
-  if (!t) throw new Error(`unknown token "${sym}" — one of: ${Object.keys(DEX_TOKENS).join(", ")}`);
+  if (!t) throw new Error(`unknown token "${sym}". One of: ${Object.keys(DEX_TOKENS).join(", ")}`);
   return { symbol: String(sym).toUpperCase(), ...t };
 }
 function dexPath(fromSym, toSym) {
@@ -1000,7 +928,6 @@ server.tool(
     const slip = Number(slippage_pct ?? 1);
     if (!Number.isFinite(slip) || slip < 0 || slip > 10) throw new Error("slippage_pct must be between 0 and 10.");
 
-    // Spending AUT is spending — the owner's caps apply exactly as for payments.
     if (F.native) {
       const pol = policy();
       if (amountIn > parseEther(String(pol.perTxMaxAUT)))
@@ -1025,7 +952,7 @@ server.tool(
       }
     }
 
-    if (F.native) recordSpend(amountIn); // reserve before broadcasting
+    if (F.native) recordSpend(amountIn);
     let tx;
     try {
       if (F.native) {
@@ -1037,7 +964,7 @@ server.tool(
       }
       await waitTx(tx);
     } catch (e) {
-      if (F.native) recordSpend(-amountIn); // refund the reservation on failure
+      if (F.native) recordSpend(-amountIn);
       throw e;
     }
     const route = path.length === 3 ? `${F.symbol} -> USDT -> ${T.symbol}` : `${F.symbol} -> ${T.symbol}`;
@@ -1076,12 +1003,9 @@ server.tool(
   })
 );
 
-/* ---------------- public task market (OpenJobBoard) ---------------- */
-
 const boardR = () => new Contract(BOARD, BOARD_ABI, provider);
 
 async function marketPosts() {
-  // Briefs live in PostCreated events; the explorer indexes them (RPC caps ranges).
   const iface = boardR().interface;
   const topic0 = iface.getEvent("PostCreated").topicHash;
   const r = await fetchT(`${SCAN}/api?module=logs&action=getLogs&fromBlock=0&toBlock=latest&address=${BOARD}&topic0=${topic0}`, 12000);
@@ -1094,7 +1018,7 @@ async function marketPosts() {
         minStake: p.args.minStake, claimBy: Number(p.args.claimBy), brief: p.args.brief });
     } catch {}
   }
-  return out.reverse(); // newest first
+  return out.reverse();
 }
 
 server.tool(
@@ -1114,7 +1038,7 @@ server.tool(
       if (open) { try { bond = await b.bondFor(p.postId); } catch {} }
       lines.push(
         `#${p.postId} · ${st}${open ? ` · closes in ${humanDuration(p.claimBy - now)}` : ""}\n` +
-        `  "${p.brief.length > 120 ? p.brief.slice(0, 120) + "…" : p.brief}"\n` +
+        `  "${p.brief.length > 120 ? p.brief.slice(0, 120) + "..." : p.brief}"\n` +
         `  budget ${formatEther(p.budget)} AUT · min stake ${formatEther(p.minStake)} AUT` +
         (open ? ` · claim bond ${formatEther(bond)} AUT` : "")
       );
@@ -1128,14 +1052,14 @@ server.tool(
   "autyon_post_task",
   "Post a task to the public market with an escrowed AUT budget. Any qualified agent can claim it (posting a bond), do the work and deliver; you then release payment. The budget counts against the owner's spend caps.",
   {
-    brief: z.string().describe("what needs to be done — this exact text is the on-chain contract the worker and any arbiter read"),
+    brief: z.string().describe("what needs to be done. This exact text is the on-chain contract the worker and any arbiter read"),
     budget: z.string().describe("AUT to escrow as the payment, e.g. \"1\""),
     hours: z.string().optional().describe("work deadline in hours once claimed (default 24)"),
     claim_hours: z.string().optional().describe("how long the post stays claimable (default 48)"),
     min_stake: z.string().optional().describe("AUT a claimer (or their owner) must have staked (default 0)"),
   },
   async ({ brief, budget, hours, claim_hours, min_stake }) => withLock(async () => {
-    if (!brief || brief.trim().length < 10) throw new Error("write a real brief — it is the contract the worker is held to.");
+    if (!brief || brief.trim().length < 10) throw new Error("write a real brief, it is the contract the worker is held to.");
     let wei;
     try { wei = parseEther(budget); } catch { throw new Error(`"${budget}" is not a valid AUT amount.`); }
     if (wei <= 0n) throw new Error(`budget must be greater than zero.`);
@@ -1162,14 +1086,14 @@ server.tool(
       }
     } catch (e) { recordSpend(-wei); throw e; }
     return { content: [{ type: "text", text:
-      `Posted task #${postId} — ${budget} AUT escrowed, claimable for ${ch}h, ${h}h of work time once claimed.\n` +
+      `Posted task #${postId}: ${budget} AUT escrowed, claimable for ${ch}h, ${h}h of work time once claimed.\n` +
       `Watch it at market.autyon.io/task/${postId}. When the worker delivers, release with autyon_release_task(${postId}).\nTx: ${SCAN}/tx/${tx.hash}` }] };
   })
 );
 
 server.tool(
   "autyon_claim_task",
-  "Claim an open task from the public market. Requires the post's min stake and attaches a refundable bond (20% of budget, capped at 5 AUT — returned when the job settles, forfeited to the poster if you ghost). The bond counts against the owner's spend caps. After claiming, do the work and use autyon_deliver with the returned escrow job id.",
+  "Claim an open task from the public market. Requires the post's min stake and attaches a refundable bond (20% of budget, capped at 5 AUT, returned when the job settles, forfeited to the poster if you ghost). The bond counts against the owner's spend caps. After claiming, do the work and use autyon_deliver with the returned escrow job id.",
   { post_id: z.string() },
   async ({ post_id }) => withLock(async () => {
     const b = boardR();
@@ -1177,7 +1101,7 @@ server.tool(
     const st = POST_STATUS[Number(g.status)] || "?";
     if (st !== "open") throw new Error(`post #${post_id} is ${st}, not open.`);
     if (Math.floor(Date.now() / 1000) > Number(g.claimBy)) throw new Error(`the claim window for post #${post_id} has closed.`);
-    if (g.poster.toLowerCase() === signer.address.toLowerCase()) throw new Error(`you posted this task — you cannot claim your own post.`);
+    if (g.poster.toLowerCase() === signer.address.toLowerCase()) throw new Error(`you posted this task, you cannot claim your own post.`);
     const myStake = await b.effectiveStake(signer.address);
     if (myStake < g.minStake)
       throw new Error(`post #${post_id} requires ${formatEther(g.minStake)} AUT staked; you have ${formatEther(myStake)}. Stake with autyon_stake first.`);
@@ -1202,7 +1126,7 @@ server.tool(
     const posts = await marketPosts().catch(() => []);
     const brief = posts.find((p) => p.postId === String(post_id))?.brief || "(brief in PostCreated event)";
     return { content: [{ type: "text", text:
-      `Claimed post #${post_id} — the ${formatEther(g.budget)} AUT budget is now escrowed to you (job #${jobId}), bond ${formatEther(bond)} AUT held.\n` +
+      `Claimed post #${post_id}: the ${formatEther(g.budget)} AUT budget is now escrowed to you (job #${jobId}), bond ${formatEther(bond)} AUT held.\n` +
       `The contract you signed up for:\n"${brief}"\n` +
       `Do the work, then autyon_deliver(${jobId}, proof). After the poster releases (or the deadline passes), autyon_settle_task(${post_id}) returns your bond.\nTx: ${SCAN}/tx/${tx.hash}` }] };
   })
@@ -1215,7 +1139,7 @@ server.tool(
   async ({ post_id }) => withLock(async () => {
     const tx = await new Contract(BOARD, BOARD_ABI, signer).release(BigInt(post_id), GAS);
     await waitTx(tx);
-    return { content: [{ type: "text", text: `Released post #${post_id} — payment sent to the worker, their bond returned.\nTx: ${SCAN}/tx/${tx.hash}` }] };
+    return { content: [{ type: "text", text: `Released post #${post_id}: payment sent to the worker, their bond returned.\nTx: ${SCAN}/tx/${tx.hash}` }] };
   })
 );
 
@@ -1226,7 +1150,7 @@ server.tool(
   async ({ post_id }) => withLock(async () => {
     const tx = await new Contract(BOARD, BOARD_ABI, signer).settle(BigInt(post_id), GAS);
     await waitTx(tx);
-    return { content: [{ type: "text", text: `Settled post #${post_id} — bond and any refund moved to their owners.\nTx: ${SCAN}/tx/${tx.hash}` }] };
+    return { content: [{ type: "text", text: `Settled post #${post_id}: bond and any refund moved to their owners.\nTx: ${SCAN}/tx/${tx.hash}` }] };
   })
 );
 
@@ -1244,6 +1168,5 @@ server.tool(
   })
 );
 
-/* ---------------- start ---------------- */
 const transport = new StdioServerTransport();
 await server.connect(transport);
